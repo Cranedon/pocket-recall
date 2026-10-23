@@ -1,0 +1,45 @@
+[project]
+name = "pocket-recall"
+version = "0.1.0"
+description = "Lossless, local long-term memory for personal AI assistants: SQLite + hybrid retrieval, served over MCP"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "cranedone", email = "vsupersusu@gmail.com" }
+]
+keywords = ["memory", "mcp", "claude", "llm", "retrieval", "longmemeval", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastembed>=0.7",
+    "huggingface-hub",
+    "mcp>=2.3.0",
+    "starlette>=1.9.0",
+    "uvicorn>=0.54.0",
+]
+
+[project.optional-dependencies]
+facts = ["anthropic>=2.0.0", "tqdm>=4.70.1"]
+eval = ["anthropic>=2.0.0", "tqdm>=4.70.1", "duckdb>=2.0.0", "pytz>=2026.5"]
+
+[project.urls]
+Repository = "https://github.com/Cranedon/pocket-recall"
+
+[build-system]
+requires = ["uv_build>=0.10.12,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pocket-recall[eval]",
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+pocket-recall = "pocket_recall.cli:main"

@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      POCKET_RECALL_MODEL_DIR: ${{ github.workspace }}/.models
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: .models
+          key: models-${{ runner.os }}-paraphrase-multilingual-MiniLM-L12-v2
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+      - name: CLI and plugin entry points start
+        run: |
+          uv run pocket-recall --help
+          uv run --frozen --no-dev pocket-recall mcp < /dev/null
+          echo '{}' | uv run --frozen --no-dev pocket-recall hook

@@ -1,0 +1,14 @@
+{
+  "name": "pocket-recall",
+  "displayName": "Pocket Recall",
+  "version": "0.1.0",
+  "description": "Lossless, local long-term memory for Claude Code: every session is saved verbatim to one SQLite file on your machine and the relevant past is recalled within a token budget. No API key, no cloud.",
+  "author": {
+    "name": "cranedone",
+    "url": "https://github.com/Cranedon"
+  },
+  "homepage": "https://github.com/Cranedon/pocket-recall",
+  "repository": "https://github.com/Cranedon/pocket-recall",
+  "license": "MIT",
+  "keywords": ["memory", "long-term-memory", "mcp", "sqlite", "local-first", "retrieval"]
+}

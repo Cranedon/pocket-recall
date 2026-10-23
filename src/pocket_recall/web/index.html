@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pocket-recall</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --line: #e3e1da; --text: #23221f; --muted: #6f6d66; --faint: #9c9a92;
+  --accent: #3b5bdb; --accent-bg: #edf1ff; --user-bg: #eef3ff; --user-line: #c9d6ff;
+  --ok: #2f7d4f; --ok-bg: #e7f4ec; --warn: #9a5b00; --warn-bg: #fdf1dc; --mark: #ffe58a; --danger: #b42318;
+  --radius: 10px; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1b19; --panel: #242422; --line: #3a3936; --text: #ecebe6; --muted: #aaa8a0; --faint: #7d7b74;
+    --accent: #8ea6ff; --accent-bg: #262d48; --user-bg: #232a40; --user-line: #39466e;
+    --ok: #7fd1a0; --ok-bg: #1f3328; --warn: #f2b85b; --warn-bg: #3a2e1a; --mark: #6b5a12; --danger: #ff8a7a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 16px; font-weight: 600; margin: 0 8px 0 0; }
+header .stat { color: var(--muted); font-size: 13px; }
+main { display: grid; grid-template-columns: 360px 1fr; gap: 16px; padding: 16px 20px; max-width: 1400px; margin: 0 auto; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 12px 16px; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.panel + .panel { margin-top: 16px; }
+h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
+input, select, textarea, button { font: inherit; color: inherit; }
+input[type=text], input[type=search], input[type=datetime-local], select, textarea {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; }
+textarea { min-height: 120px; resize: vertical; font-family: var(--mono); font-size: 13px; }
+button { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+button:hover { border-color: var(--faint); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+@media (prefers-color-scheme: dark) { button.primary { color: #10131f; } }
+button.link { border: none; background: none; padding: 0; color: var(--accent); }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > .grow { flex: 1; min-width: 0; }
+.muted { color: var(--muted); } .faint { color: var(--faint); font-size: 12px; }
+.sessions { list-style: none; margin: 10px 0 0; padding: 0; max-height: calc(100vh - 240px); overflow: auto; }
+.sessions li { padding: 8px 6px; border-top: 1px solid var(--line); cursor: pointer; }
+.sessions li:hover { background: var(--bg); }
+.sessions .date { font-size: 12px; color: var(--muted); }
+.sessions .preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); color: var(--muted); }
+.chip.ok { background: var(--ok-bg); color: var(--ok); border-color: transparent; }
+.chip.warn { background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.chip.accent { background: var(--accent-bg); color: var(--accent); border-color: transparent; }
+button.chip { cursor: pointer; }
+.session-card { border: 1px solid var(--line); border-radius: var(--radius); margin-top: 12px; overflow: hidden; }
+.session-card .head { display: flex; justify-content: space-between; gap: 8px; padding: 8px 12px; background: var(--bg); border-bottom: 1px solid var(--line); font-size: 13px; }
+.msg { padding: 8px 12px; white-space: pre-wrap; word-break: break-word; }
+.msg + .msg { border-top: 1px dashed var(--line); }
+.msg .role { font-size: 12px; font-weight: 600; color: var(--muted); margin-right: 6px; }
+.msg.user { background: var(--user-bg); }
+.msg.assistant .body.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+mark { background: var(--mark); color: inherit; border-radius: 2px; }
+.bar { height: 6px; border-radius: 3px; background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); }
+.error { color: var(--danger); font-size: 13px; margin-top: 6px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 600px) { .grid2 { grid-template-columns: 1fr; } }
+label.small { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+details summary { cursor: pointer; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>pocket-recall <span class="muted" data-i18n="subtitle"></span></h1>
+  <select id="store" style="width:auto;min-width:220px" data-i18n-aria="store"></select>
+  <span class="stat" id="storeStat"></span>
+  <span style="flex:1"></span>
+  <button id="newStore" data-i18n="newStore"></button>
+  <button id="lang" title="Language / 语言"></button>
+</header>
+
+<main>
+  <section>
+    <div class="panel">
+      <h2 data-i18n="conversations"></h2>
+      <input type="search" id="search" data-i18n-ph="search">
+      <div class="faint" id="sessionCount" style="margin-top:6px"></div>
+      <ul class="sessions" id="sessionList"></ul>
+      <div class="row" style="margin-top:8px">
+        <button id="prev" data-i18n="prev"></button><span class="grow faint" id="page" style="text-align:center"></span><button id="next" data-i18n="next"></button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="panel">
+      <h2 data-i18n="recall"></h2>
+      <div class="row">
+        <input type="text" id="query" class="grow" data-i18n-ph="query" autocomplete="off">
+        <button class="primary" id="ask" data-i18n="ask"></button>
+      </div>
+      <div class="chips" id="examples"></div>
+      <div class="grid2" style="margin-top:8px">
+        <div>
+          <label class="small" for="budget"><span data-i18n="budget"></span> <span id="budgetVal">8000</span></label>
+          <input type="range" id="budget" min="500" max="16000" step="500" value="8000" style="width:100%">
+        </div>
+        <div>
+          <label class="small" for="now" data-i18n="now"></label>
+          <div class="row"><input type="datetime-local" id="now" class="grow"><button id="useLast" data-i18n="useLast" data-i18n-title="useLastTitle"></button></div>
+        </div>
+      </div>
+      <div class="error" id="askError"></div>
+      <div id="reference" class="faint" style="margin-top:8px" hidden></div>
+    </div>
+
+    <div class="panel" id="resultPanel" hidden>
+      <div class="row"><h2 class="grow" style="margin:0" data-i18n="recalled"></h2>
+        <select id="order" style="width:auto" data-i18n-aria="order"><option value="rank" data-i18n="byRank"></option><option value="time" data-i18n="byTime"></option></select>
+        <button id="copy" data-i18n="copy"></button></div>
+      <div class="chips" id="resultChips"></div>
+      <div class="bar" data-i18n-title="budgetShare"><div id="budgetBar" style="width:0"></div></div>
+      <p class="faint" style="margin:8px 0 0" data-i18n="packing"></p>
+      <div id="results"></div>
+    </div>
+
+    <div class="panel" id="viewPanel" hidden>
+      <div class="row"><h2 class="grow" style="margin:0" data-i18n="fullSession"></h2><button id="deleteSession" data-i18n="delete"></button><button id="closeView" data-i18n="close"></button></div>
+      <div id="view"></div>
+    </div>
+
+    <div class="panel">
+      <details>
+        <summary data-i18n="add"></summary>
+        <p class="faint" data-i18n-html="addHelp"></p>
+        <textarea id="newText" data-i18n-ph="addPlaceholder"></textarea>
+        <div class="row" style="margin-top:8px">
+          <label class="small" for="newDate" style="margin:0" data-i18n="addDate"></label>
+          <input type="datetime-local" id="newDate" class="grow" style="max-width:240px">
+          <span class="grow"></span><button class="primary" id="save" data-i18n="save"></button>
+        </div>
+        <div class="error" id="saveError"></div>
+      </details>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+const I18N = {
+  en: {
+    subtitle: "memory workbench", store: "Memory store", newStore: "New store", conversations: "Conversations",
+    search: "Search the original text…", prev: "Previous", next: "Next", recall: "Recall",
+    query: "Ask about the past, e.g. What was I working on last month?", ask: "Recall", asking: "Recalling…",
+    budget: "Token budget:", now: "What “now” is (used to read “last week”, “yesterday”)",
+    useLast: "Use last day in store", useLastTitle: "Set “now” to the time of the store's last message",
+    recalled: "Recalled", order: "Order", byRank: "By relevance", byTime: "By time (order sent to the model)",
+    copy: "Copy as prompt", copied: "Copied", budgetShare: "Share of the budget used",
+    packing: "The 3 most relevant rounds come with the assistant's replies; everything else is the user's own words.",
+    fullSession: "Full conversation", delete: "Delete conversation", close: "Close", add: "Add a conversation",
+    addHelp: "One message per line, starting with <code>user:</code> or <code>assistant:</code>; lines without a prefix continue the previous message.",
+    addPlaceholder: "user: I switched my car to Michelin tyres last week.\nassistant: Noted.",
+    addDate: "This conversation happened at", save: "Save",
+    noStores: "No memory store yet: create one at the top right",
+    stat: (s) => `${s.sessions} conversations · ${s.messages} messages · ~${s.tokens_est.toLocaleString()} tokens`
+      + (s.facts ? ` · ${s.facts} facts` : "") + (s.range ? ` · ${s.range[0].slice(0, 10)} to ${s.range[1].slice(0, 10)}` : ""),
+    total: (n) => `${n} conversations`, msgCount: (n) => `${n} messages`, noUserMsg: "(no user message)",
+    user: "User", assistant: "Assistant", expand: "More", collapse: "Less",
+    rank: (n) => `Relevance #${n}`, inWindow: "In time range", openFull: "Full conversation",
+    facts: (n) => `Facts extracted at write time (${n})`,
+    noFacts: "No facts extracted for this conversation (the `pocket-recall facts` command calls a model).",
+    session: (id) => `conversation ${id}`,
+    refAnswer: "Reference answer: ", refWhere: "Where: ", refExpect: "Words that should come back: ",
+    needQuery: "Type a question first", needStore: "Pick a memory store first",
+    emptyWindow: (w) => `Time range ${w[0]} to ${w[1]} · no conversations in it, results below are by content`,
+    window: (r) => `Time range ${r.window[0]} to ${r.window[1]} (${r.window_records} rounds) · `
+      + (r.time_only ? "time-only question: that period strictly first" : "time adds weight, content still counts"),
+    noWindow: "No time expression found in the question",
+    tokens: (r) => `~${r.tokens_est.toLocaleString()} / ${r.budget.toLocaleString()} tokens`,
+    picked: (r) => `${r.sessions.length} conversations · picked from ${r.rounds_considered} rounds · ${r.ms} ms`,
+    nothing: "Nothing came back.",
+    prompt: (now, text, q) => `Current time: ${now}\nRelevant records recalled from past conversations:\n\n${text}\n\nQuestion: ${q}`,
+    confirmDelete: "Delete this conversation permanently?", noMessages: "No messages found: start each one with user: or assistant:",
+    newStoreName: "Name of the new store (letters, digits, - or _)", requestFailed: (n) => `Request failed (${n})`,
+    sep: ", ",
+  },
+  zh: {
+    subtitle: "记忆测试台", store: "记忆库", newStore: "新建记忆库", conversations: "对话记录",
+    search: "在原文里搜索…", prev: "上一页", next: "下一页", recall: "检索记忆",
+    query: "问一个关于过去的问题，比如：上个月我在忙什么？", ask: "检索", asking: "检索中…",
+    budget: "token 预算：", now: "“现在”是什么时候（解释“上周”“昨天”用）",
+    useLast: "用库里最后一天", useLastTitle: "把“现在”设为这个记忆库最后一条消息的时间",
+    recalled: "取回的内容", order: "排序", byRank: "按相关度", byTime: "按时间（发给模型的顺序）",
+    copy: "复制为提示词", copied: "已复制", budgetShare: "占预算的比例",
+    packing: "最相关的 3 轮会连同助手回复一起放进来，其余只放用户的原话。",
+    fullSession: "完整会话", delete: "删除此会话", close: "关闭", add: "添加一段对话",
+    addHelp: "每条消息一行，以 <code>user:</code> 或 <code>assistant:</code> 开头；没写开头的行接在上一条后面。",
+    addPlaceholder: "user: 我上周把车的轮胎换成了米其林的。\nassistant: 好的，记下了。",
+    addDate: "这段对话发生在", save: "保存",
+    noStores: "还没有记忆库，点右上角新建",
+    stat: (s) => `${s.sessions} 段对话 · ${s.messages} 条消息 · 约 ${s.tokens_est.toLocaleString()} token`
+      + (s.facts ? ` · ${s.facts} 条事实` : "") + (s.range ? ` · ${s.range[0].slice(0, 10)} 至 ${s.range[1].slice(0, 10)}` : ""),
+    total: (n) => `共 ${n} 段`, msgCount: (n) => `${n} 条`, noUserMsg: "（无用户消息）",
+    user: "用户", assistant: "助手", expand: "展开", collapse: "收起",
+    rank: (n) => `相关度第 ${n}`, inWindow: "在时间范围内", openFull: "看完整会话",
+    facts: (n) => `写入时抽取的事实（${n} 条）`,
+    noFacts: "这段对话还没有抽取事实（pocket-recall facts 命令，会调用模型）。",
+    session: (id) => `会话 ${id}`,
+    refAnswer: "参考答案：", refWhere: "原文位置：", refExpect: "应取回的关键词：",
+    needQuery: "先输入一个问题", needStore: "先选一个记忆库",
+    emptyWindow: (w) => `时间范围 ${w[0]} 至 ${w[1]} · 这段时间没有任何对话，下面是按内容找到的`,
+    window: (r) => `时间范围 ${r.window[0]} 至 ${r.window[1]}（${r.window_records} 轮）· `
+      + (r.time_only ? "只问时间：该时段严格优先" : "时间加分，内容仍然起作用"),
+    noWindow: "问题里没有识别到时间",
+    tokens: (r) => `约 ${r.tokens_est.toLocaleString()} / ${r.budget.toLocaleString()} token`,
+    picked: (r) => `${r.sessions.length} 段对话 · 从 ${r.rounds_considered} 轮里挑 · ${r.ms} ms`,
+    nothing: "什么也没取回。",
+    prompt: (now, text, q) => `当前时间：${now}\n以下是从过往对话中取回的相关记录：\n\n${text}\n\n问题：${q}`,
+    confirmDelete: "永久删除这段对话？", noMessages: "没有识别到消息：每条以 user: 或 assistant: 开头",
+    newStoreName: "新记忆库的名字（字母、数字、- 或 _）", requestFailed: (n) => `请求失败（${n}）`,
+    sep: "、",
+  },
+};
+let lang = (() => { try { const v = localStorage.getItem("pocket_recall.lang"); if (v in I18N) return v; } catch (e) {} return navigator.language.startsWith("zh") ? "zh" : "en"; })();
+const t = (key, ...args) => { const v = I18N[lang][key]; return typeof v === "function" ? v(...args) : v; };
+
+function applyLang() {
+  document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  for (const n of document.querySelectorAll("[data-i18n]")) n.textContent = t(n.dataset.i18n);
+  for (const n of document.querySelectorAll("[data-i18n-html]")) n.innerHTML = t(n.dataset.i18nHtml);
+  for (const n of document.querySelectorAll("[data-i18n-ph]")) n.placeholder = t(n.dataset.i18nPh);
+  for (const n of document.querySelectorAll("[data-i18n-title]")) n.title = t(n.dataset.i18nTitle);
+  for (const n of document.querySelectorAll("[data-i18n-aria]")) n.setAttribute("aria-label", t(n.dataset.i18nAria));
+  $("lang").textContent = lang === "zh" ? "English" : "中文";
+}
+const state = { db: "", offset: 0, limit: 40, viewing: null, lastText: "", stores: [] };
+
+async function api(path, body) {
+  const res = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((data && data.error) || t("requestFailed", res.status));
+  return data;
+}
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v; else if (k.startsWith("on")) node.addEventListener(k.slice(2), v); else node.setAttribute(k, v);
+  }
+  for (const c of children) if (c != null) node.append(c);
+  return node;
+}
+
+const fmt = (iso) => iso ? iso.slice(0, 16).replace("T", " ") : "";
+const STOP = new Set("the a an and or of to in on at for is are was were did do does i my me you we what how when which who with about from that this have has had any".split(" "));
+
+function terms(query) {
+  const out = new Set();
+  for (const w of query.toLowerCase().match(/[a-z0-9']{3,}/g) || []) if (!STOP.has(w)) out.add(w);
+  for (const run of query.match(/[㐀-鿿]+/g) || []) for (let i = 0; i + 1 < run.length; i++) out.add(run.slice(i, i + 2));
+  return [...out].filter((t) => !/^(什么|怎么|哪些|我的|我在|了吗|一下|上周|昨天|今天|上个|个月)$/.test(t));
+}
+
+function highlighted(text, words) {
+  const frag = document.createDocumentFragment();
+  if (!words.length) { frag.append(text); return frag; }
+  const re = new RegExp("(" + words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|") + ")", "gi");
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    frag.append(text.slice(last, m.index), el("mark", {}, m[0]));
+    last = m.index + m[0].length;
+  }
+  frag.append(text.slice(last));
+  return frag;
+}
+
+function messageNode(m, words, sessionDay) {
+  const isUser = m.role === "user";
+  const body = el("span", { class: "body" + (isUser ? "" : " clamp") }, highlighted(m.content, words));
+  const extra = m.created_at && sessionDay && m.created_at.slice(0, 10) !== sessionDay ? ` (${m.created_at.slice(0, 10)})` : "";
+  const node = el("div", { class: "msg " + m.role }, el("span", { class: "role" }, t(isUser ? "user" : "assistant") + extra), body);
+  if (!isUser && m.content.length > 200) {
+    const toggle = el("button", { class: "link", style: "margin-left:6px;font-size:12px", onclick: () => {
+      body.classList.toggle("clamp"); toggle.textContent = t(body.classList.contains("clamp") ? "expand" : "collapse"); } }, t("expand"));
+    node.append(toggle);
+  }
+  return node;
+}
+
+function sessionCard(s, words, title, window) {
+  const day = s.started_at.slice(0, 10);
+  const tags = el("span", { class: "row", style: "gap:6px" });
+  if (s.rank) tags.append(el("span", { class: "chip accent" }, t("rank", s.rank)));
+  if (window && s.messages.some((m) => (m.created_at || s.started_at).slice(0, 10) >= window[0] && (m.created_at || s.started_at).slice(0, 10) <= window[1]))
+    tags.append(el("span", { class: "chip warn" }, t("inWindow")));
+  const head = el("div", { class: "head" }, el("span", { class: "row", style: "gap:8px" }, title || fmt(s.started_at), tags),
+    el("button", { class: "link", onclick: () => openSession(s.id) }, t("openFull")));
+  return el("div", { class: "session-card" }, head, ...s.messages.map((m) => messageNode(m, words, day)));
+}
+
+async function loadStores(select) {
+  state.stores = await api("/api/stores");
+  const sel = $("store");
+  sel.replaceChildren(...state.stores.map((s) => el("option", { value: s.name }, s.name)));
+  if (!state.stores.length) { $("storeStat").textContent = t("noStores"); return; }
+  state.db = select && state.stores.some((s) => s.name === select) ? select
+    : (localStorage.getItem("pocket_recall.db") && state.stores.some((s) => s.name === localStorage.getItem("pocket_recall.db")) ? localStorage.getItem("pocket_recall.db") : state.stores[0].name);
+  sel.value = state.db;
+  onStoreChange();
+}
+
+function onStoreChange() {
+  const s = state.stores.find((x) => x.name === state.db);
+  try { localStorage.setItem("pocket_recall.db", state.db); } catch (e) {}
+  $("storeStat").textContent = s ? t("stat", s) : "";
+  $("examples").replaceChildren(...((s && s.questions) || []).map((item) => {
+    const q = typeof item === "string" ? { q: item } : item;
+    return el("button", { class: "chip", onclick: () => {
+      $("query").value = q.q;
+      if (q.now) $("now").value = q.now.slice(0, 16);
+      state.example = q; ask();
+    } }, q.q);
+  }));
+  state.offset = 0; $("resultPanel").hidden = true; $("viewPanel").hidden = true;
+  loadSessions();
+}
+
+async function loadSessions() {
+  if (!state.db) return;
+  const q = encodeURIComponent($("search").value.trim());
+  const data = await api(`/api/sessions?db=${encodeURIComponent(state.db)}&q=${q}&limit=${state.limit}&offset=${state.offset}`);
+  $("sessionCount").textContent = t("total", data.total);
+  $("page").textContent = data.total ? `${state.offset + 1}–${Math.min(state.offset + state.limit, data.total)}` : "";
+  $("prev").disabled = state.offset === 0; $("next").disabled = state.offset + state.limit >= data.total;
+  $("sessionList").replaceChildren(...data.sessions.map((s) => el("li", { onclick: () => openSession(s.id) },
+    el("div", { class: "date" }, `${fmt(s.started_at)} · ${t("msgCount", s.messages)}`), el("div", { class: "preview" }, s.preview || t("noUserMsg")))));
+}
+
+async function openSession(id) {
+  const s = await api(`/api/session?db=${encodeURIComponent(state.db)}&id=${encodeURIComponent(id)}`);
+  state.viewing = id;
+  const facts = (s.facts || []).length
+    ? el("div", { class: "msg" }, el("span", { class: "role" }, t("facts", s.facts.length)),
+        el("ul", { style: "margin:4px 0 0;padding-left:18px" }, ...s.facts.map((f) => el("li", {}, f))))
+    : el("p", { class: "faint", style: "margin:8px 0 0" }, t("noFacts"));
+  $("view").replaceChildren(sessionCard(s, terms($("query").value), `${fmt(s.started_at)} · ${t("session", s.id)}`), facts);
+  $("viewPanel").hidden = false;
+  $("viewPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function showReference() {
+  const ex = state.example, box = $("reference");
+  if (!ex || ex.q !== $("query").value.trim() || !ex.answer) { box.hidden = true; return; }
+  box.replaceChildren(el("b", {}, t("refAnswer")), ex.answer, el("br"), el("b", {}, t("refWhere")), ex.where || "",
+    el("br"), el("b", {}, t("refExpect")), (ex.expect || []).join(t("sep")));
+  box.hidden = false;
+}
+
+async function ask() {
+  const query = $("query").value.trim();
+  showReference();
+  $("askError").textContent = "";
+  if (!query) { $("askError").textContent = t("needQuery"); return; }
+  if (!state.db) { $("askError").textContent = t("needStore"); return; }
+  $("ask").disabled = true; $("ask").textContent = t("asking");
+  try {
+    const r = await api("/api/recall", { db: state.db, query, budget: +$("budget").value, now: $("now").value || null });
+    state.lastText = r.text; state.last = r;
+    const chips = [];
+    if (r.window && !r.window_records) chips.push(el("span", { class: "chip warn" }, t("emptyWindow", r.window)));
+    else if (r.window) chips.push(el("span", { class: "chip " + (r.time_only ? "warn" : "accent") }, t("window", r)));
+    else chips.push(el("span", { class: "chip" }, t("noWindow")));
+    chips.push(el("span", { class: "chip ok" }, t("tokens", r)));
+    chips.push(el("span", { class: "chip" }, t("picked", r)));
+    $("resultChips").replaceChildren(...chips);
+    $("budgetBar").style.width = Math.min(100, (100 * r.tokens_est) / r.budget) + "%";
+    renderResults();
+    $("resultPanel").hidden = false;
+  } catch (e) { $("askError").textContent = e.message; }
+  finally { $("ask").disabled = false; $("ask").textContent = t("ask"); }
+}
+
+function renderResults() {
+  const r = state.last; if (!r) return;
+  const words = terms($("query").value);
+  const list = [...r.sessions].sort((a, b) => $("order").value === "rank" ? a.rank - b.rank : a.started_at.localeCompare(b.started_at));
+  $("results").replaceChildren(...(list.length ? list.map((s) => sessionCard(s, words, null, r.window)) : [el("p", { class: "muted" }, t("nothing"))]));
+}
+
+function parseConversation(text) {
+  const msgs = [];
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*(user|assistant|用户|助手)\s*[:：]\s*(.*)$/i);
+    if (m) msgs.push({ role: /^(user|用户)$/i.test(m[1]) ? "user" : "assistant", content: m[2] });
+    else if (msgs.length) msgs[msgs.length - 1].content += "\n" + line;
+  }
+  return msgs.filter((m) => m.content.trim());
+}
+
+$("store").addEventListener("change", (e) => { state.db = e.target.value; onStoreChange(); });
+$("search").addEventListener("input", () => { clearTimeout(state.t); state.t = setTimeout(() => { state.offset = 0; loadSessions(); }, 250); });
+$("prev").onclick = () => { state.offset = Math.max(0, state.offset - state.limit); loadSessions(); };
+$("next").onclick = () => { state.offset += state.limit; loadSessions(); };
+$("budget").oninput = (e) => { $("budgetVal").textContent = e.target.value; };
+$("ask").onclick = ask;
+$("query").addEventListener("keydown", (e) => { if (e.key === "Enter") ask(); });
+$("useLast").onclick = () => {
+  const s = state.stores.find((x) => x.name === state.db);
+  if (s && s.range) $("now").value = s.range[1].slice(0, 16);
+};
+$("order").onchange = renderResults;
+$("closeView").onclick = () => { $("viewPanel").hidden = true; };
+$("copy").onclick = async () => {
+  const now = $("now").value ? $("now").value.replace("T", " ") : new Date().toLocaleString();
+  await navigator.clipboard.writeText(t("prompt", now, state.lastText, $("query").value));
+  $("copy").textContent = t("copied"); setTimeout(() => ($("copy").textContent = t("copy")), 1500);
+};
+$("deleteSession").onclick = async () => {
+  if (!state.viewing || !confirm(t("confirmDelete"))) return;
+  await api("/api/delete", { db: state.db, id: state.viewing });
+  $("viewPanel").hidden = true; await loadStores(state.db);
+};
+$("save").onclick = async () => {
+  $("saveError").textContent = "";
+  const messages = parseConversation($("newText").value);
+  if (!messages.length) { $("saveError").textContent = t("noMessages"); return; }
+  try {
+    await api("/api/save", { db: state.db, messages, started_at: $("newDate").value || null });
+    $("newText").value = ""; await loadStores(state.db);
+  } catch (e) { $("saveError").textContent = e.message; }
+};
+$("newStore").onclick = async () => {
+  const name = prompt(t("newStoreName"));
+  if (!name) return;
+  try { const r = await api("/api/stores", { name }); await loadStores(r.name); } catch (e) { alert(e.message); }
+};
+$("lang").onclick = () => {
+  lang = lang === "zh" ? "en" : "zh";
+  try { localStorage.setItem("pocket_recall.lang", lang); } catch (e) {}
+  applyLang(); onStoreChange();
+  if ($("query").value.trim()) ask();
+};
+applyLang();
+loadStores();
+</script>
+</body>
+</html>

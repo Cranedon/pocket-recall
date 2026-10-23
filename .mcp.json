@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "pocket-recall": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--frozen", "--no-dev", "--project", "${CLAUDE_PLUGIN_ROOT}", "pocket-recall", "mcp"],
+      "env": {
+        "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/venv",
+        "POCKET_RECALL_AUTOSAVE": "1"
+      }
+    }
+  }
+}

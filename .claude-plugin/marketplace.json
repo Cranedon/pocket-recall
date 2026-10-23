@@ -1,0 +1,15 @@
+{
+  "name": "pocket-recall",
+  "description": "Lossless, local long-term memory for Claude Code",
+  "owner": {
+    "name": "cranedone",
+    "url": "https://github.com/Cranedon"
+  },
+  "plugins": [
+    {
+      "name": "pocket-recall",
+      "source": "./",
+      "description": "Saves every Claude Code session verbatim to a local SQLite file and recalls the relevant past within a token budget. No API key, no cloud."
+    }
+  ]
+}
