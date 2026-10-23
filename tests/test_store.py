@@ -246,3 +246,27 @@ def test_answers_in_assistant_replies(tmp_path):
     assert "Zephyr" not in off.recall("新中转有什么问题？模型自称什么？", budget_tokens=400).text
     off.close()
     s.close()
+
+
+def test_cjk_text_is_estimated_conservatively():
+    from pocket_recall.core import CJK_TOKENS_PER_CHAR, estimate_tokens
+
+    english = "I moved to Lisbon in March and joined a climbing gym. " * 10
+    assert estimate_tokens(english) == int(len(english) / 2.6) + 1  # unchanged for English
+    chinese = "我三月份搬到了里斯本，加入了一家攀岩馆。" * 10
+    cjk = sum("一" <= c <= "鿿" for c in chinese)
+    assert estimate_tokens(chinese) >= cjk * CJK_TOKENS_PER_CHAR
+    assert estimate_tokens("东京 Tokyo 2026") == int(len(" Tokyo 2026") / 2.6 + 2 * CJK_TOKENS_PER_CHAR) + 1
+
+
+def test_chinese_recall_stays_within_budget(tmp_path):
+    from pocket_recall.core import CJK_TOKENS_PER_CHAR
+
+    s = MemoryStore(tmp_path / "m.db", scorer="bm25")
+    for i in range(40):
+        s.add_session(chat(f"第{i}次聊天：我在研究量化回测框架，今天试了止损单和仓位管理，结果还不错。" * 3),
+                      started_at=f"2026-01-{i % 28 + 1:02d}")
+    r = s.recall("我试过哪些止损和仓位管理的方法？", budget_tokens=1000)
+    cjk = sum("一" <= c <= "鿿" for c in r.text)
+    assert r.sessions and r.tokens_est <= 1000 and cjk * CJK_TOKENS_PER_CHAR <= 1000
+    s.close()

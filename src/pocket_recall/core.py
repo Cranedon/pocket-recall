@@ -25,6 +25,10 @@ from typing import Protocol, Sequence
 import numpy as np
 
 CHARS_PER_TOKEN = 2.6
+# Chinese, Japanese and Korean take far more tokens per character than English. Not measured on
+# Opus 5.5's tokenizer (the relay used for the benchmarks has no token-count endpoint); 1.5 is a
+# deliberately high guess so that CJK packs stay under budget even with an inefficient tokenizer.
+CJK_TOKENS_PER_CHAR = 1.5
 SESSION_HEADER_TOKENS = 20  # "### Session N:\nSession Date: ...\nSession Content:\n"
 TURN_PREFIX_TOKENS = 3  # "\n\nuser: "
 RRF_K = 60
@@ -55,10 +59,14 @@ class EmbedderLike(Protocol):
     def query(self, text: str) -> np.ndarray: ...
 
 
+_CJK_CHAR = re.compile(r"[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]")
+
+
 def estimate_tokens(text: str) -> int:
-    # Used only for packing. Measured on LongMemEval-S history with the Opus 5.5 tokenizer:
-    # 2.63-3.08 chars/token, so 2.6 keeps packs at or under budget.
-    return int(len(text) / CHARS_PER_TOKEN) + 1
+    # Used only for packing. Other text: measured on LongMemEval-S history with the Opus 5.5
+    # tokenizer at 2.63-3.08 chars/token, so 2.6 keeps packs at or under budget.
+    cjk = len(_CJK_CHAR.findall(text))
+    return int((len(text) - cjk) / CHARS_PER_TOKEN + cjk * CJK_TOKENS_PER_CHAR) + 1
 
 
 @dataclass
@@ -184,7 +192,10 @@ def chunk_text(text: str, chunk_tokens: int) -> list[str]:
         if chunks and estimate_tokens(chunks[-1]) + estimate_tokens(sentence) <= chunk_tokens:
             chunks[-1] += " " + sentence.strip()
         else:
-            chunks.append(sentence.strip()[: int(chunk_tokens * CHARS_PER_TOKEN * 2)])
+            sentence = sentence.strip()
+            # an overlong "sentence" (a pasted log, a run-on line) is cut to about two chunks
+            limit = int(2 * chunk_tokens * len(sentence) / estimate_tokens(sentence))
+            chunks.append(sentence[: max(limit, 1)])
     return chunks
 
 

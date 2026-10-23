@@ -3,4 +3,4 @@
 from .store import MemoryStore, Recall
 
 __all__ = ["MemoryStore", "Recall"]
-__version__ = "0.1.1"
+__version__ = "0.1.2"

@@ -181,6 +181,23 @@ Measured on an M3 MacBook (16 GB), on 500 real user messages and the same questi
 
 bge-m3 reads up to 8192 tokens. Batches are padded to their longest text, so for this model batching was twice as slow as embedding one passage at a time, and passages are capped at 2,000 characters. On real users it is a wash, at 25× the embedding time. Optional: `POCKET_RECALL_EMBED_MODEL=BAAI/bge-m3`.
 
+### Token estimate for Chinese (0.1.2)
+
+Packing estimates tokens from characters. Up to 0.1.1, every character counted as 1/2.6 of a token, a ratio measured on English LongMemEval text with Claude's tokenizer. Chinese takes far more tokens per character, so Chinese packs overran their budget. 0.1.2 counts each CJK character as 1.5 tokens, a deliberately high guess, because the relay used here offers no token-count endpoint to measure the real ratio. Other text keeps 2.6.
+
+| On the 58 Chinese real-user questions | 2k budget | 8k budget |
+|---|---:|---:|
+| 0.1.1 pack size under the new estimate (median / max) | 1.84× / 2.83× | 1.68× / 2.26× |
+
+| Real-user questions with all expected words recalled (70) | 2k | 8k |
+|---|---:|---:|
+| 0.1.1 | 45 | 60 |
+| 0.1.2 | 43 | 57 |
+
+All 6 changed questions are Chinese, and the English store's results did not move. The lower scores are the honest price of staying inside the budget: part of 0.1.1's Chinese results came from sending up to 2.8× the context. The Chinese ranking check (18 of 20) does not depend on the budget and did not change. If Claude's real ratio is lower than 1.5 tokens per character, Chinese packs now leave some budget unused; measuring it with an official API key would let the constant be tightened.
+
+Experiments in section 6 were run with the 0.1.1 estimate; each of their tables compares methods under the same estimate.
+
 ## 7. Real-user checks
 
 Benchmarks are synthetic, so development also used real conversations:

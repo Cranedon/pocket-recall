@@ -1084,7 +1084,7 @@ wheels = [
 
 [[package]]
 name = "pocket-recall"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastembed" },
