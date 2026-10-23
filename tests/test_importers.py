@@ -29,6 +29,8 @@ def write_transcript(path):
         _line(type="user", timestamp="2026-10-20T08:07:00Z", isSidechain=True,
               message={"role": "user", "content": "sub-agent prompt"}),
         _line(type="queue-operation", timestamp="2026-10-20T08:07:30Z"),
+        _line(type="user", timestamp="2026-10-20T08:08:00Z", isCompactSummary=True, isVisibleInTranscriptOnly=True,
+              message={"role": "user", "content": "This session is being continued from a previous conversation"}),
         "not json\n",
         _line(type="user", timestamp="2026-10-20T08:10:00Z",
               message={"role": "user", "content": "订周五去成都的机票，靠窗"}),

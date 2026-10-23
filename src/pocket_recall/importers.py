@@ -40,6 +40,8 @@ def _text_blocks(content) -> str:
 def _is_human(line: dict) -> bool:
     if line.get("type") != "user" or line.get("isMeta") or line.get("isSidechain"):
         return False
+    if line.get("isCompactSummary") or line.get("isVisibleInTranscriptOnly"):
+        return False  # the summary Claude Code writes when it compacts a long session
     content = line.get("message", {}).get("content")
     if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
         return False
