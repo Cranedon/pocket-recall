@@ -79,6 +79,23 @@ LongMemEval-S 端到端答题：回答和评判都用 Claude Opus 5.5，官方�
 
 `pocket-recall web --dir ~/.pocket-recall` 会在 http://localhost:8765 打开一个测试台，中英文可切换：可以浏览每段对话、搜索原文，并查看给定问题、预算和“当前时间”时，`recall` 到底会返回什么。
 
+## 换用其他模型
+
+记忆本身不调用任何模型。只有可选的 `pocket-recall facts`（事实抽取）和 `pocket-recall eval`（评测）会用到模型，二者都接受 `provider:model` 写法，所以哪家模型都能用：
+
+- 不写前缀（如 `claude-opus-5-5`）或 `anthropic:...`：Anthropic，读 `ANTHROPIC_API_KEY`，中转站可设 `ANTHROPIC_BASE_URL`
+- `openai:`、`deepseek:`、`qwen:`、`moonshot:`、`openrouter:`：OpenAI 兼容接口，读 `<NAME>_API_KEY`，地址可用 `<NAME>_BASE_URL` 覆盖
+- `ollama:qwen2.5:7b`：本机 Ollama，无需密钥
+- 其他任意名字（如 `mylab:my-model`）：设置 `MYLAB_BASE_URL` 后即可接入 vLLM、LM Studio 等
+- `echo`：离线假模型，用于冒烟测试
+
+```bash
+pocket-recall facts DB --model deepseek:deepseek-chat
+pocket-recall eval run --answer-model openai:gpt-5 --judge-model claude-opus-5-5
+```
+
+密钥只从环境变量（评测还会读仓库里被 gitignore 的 `.env`）读取，只发给对应的接口，从不打印。
+
 ## 开发
 
 ```bash

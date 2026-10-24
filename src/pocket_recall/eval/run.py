@@ -13,19 +13,20 @@ import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from urllib.parse import urlparse
 
 from tqdm import tqdm
 
 from . import data
 from .baselines import estimate_tokens, make_method
-from .llm import LLM, ClaudeLLM, EchoLLM
+from ..llm import LLM, make_llm, parse_model, served_as_requested
 from .prompts import answer_prompt, judge_prompt, parse_judgement
 from ..store import DEFAULT_EMBED_MODEL as STORE_EMBED_MODEL
 
 RESULTS_DIR = data.DATA_DIR.parent / "results"
 
-# $ per million tokens (input, output). Haiku 5.5 doubles past 100K-token prompts; not modelled here.
+# $ per million tokens (input, output), keyed by model name without provider prefix. Models not
+# listed here (other providers, local models) get no cost line. Haiku 5.5 doubles past 100K-token
+# prompts; not modelled here.
 PRICES = {
     "claude-opus-5-5": (4.00, 20.00),
     "claude-sonnet-5-5": (2.00, 10.00),
@@ -37,13 +38,17 @@ ANSWER_MAX_TOKENS = 16000
 JUDGE_MAX_TOKENS = 2000
 
 
-def make_llm(model: str, effort: str, fallbacks: bool) -> LLM:
-    return EchoLLM() if model == "echo" else ClaudeLLM(model, effort=effort, fallbacks=fallbacks)
+def price(model: str) -> tuple[float, float] | None:
+    if model == "echo":
+        return (0.0, 0.0)
+    return PRICES.get(parse_model(model)[1])
 
 
-def cost(model: str, input_tokens: int, cache_write: int, cache_read: int, output_tokens: int) -> float:
-    """List-price equivalent; cache writes bill at 1.25x input, cache reads at 0.1x."""
-    pin, pout = PRICES.get(model, (0.0, 0.0))
+def cost(model: str, input_tokens: int, cache_write: int, cache_read: int, output_tokens: int) -> float | None:
+    """List-price equivalent; cache writes bill at 1.25x input, cache reads at 0.1x. None: price unknown."""
+    if (p := price(model)) is None:
+        return None
+    pin, pout = p
     uncached = input_tokens - cache_write - cache_read
     return ((uncached + 1.25 * cache_write + 0.1 * cache_read) * pin + output_tokens * pout) / 1e6
 
@@ -62,7 +67,7 @@ def evaluate_one(inst: data.Instance, method, answerer: LLM, judge: LLM, style: 
         "hypothesis": ans.text,
         "correct": parse_judgement(verdict.text),
         "judge_reply": verdict.text,
-        "endpoint": urlparse(os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")).netloc,
+        "endpoint": answerer.endpoint,
         "answer_model_requested": answerer.name,
         "answer_model": ans.model,
         "answer_stop_reason": ans.stop_reason,
@@ -125,7 +130,8 @@ def cmd_run(args) -> None:
         method.warm(instances)
     variant = "" if args.answer_style == "official" else f"-{args.answer_style}"
     variant += "" if args.effort == "medium" else f"-e{args.effort}"
-    run_name = args.name or f"{args.split}-{method.name}{variant}-{args.answer_model}-n{len(instances)}"
+    model_tag = args.answer_model.replace(":", "_").replace("/", "_")
+    run_name = args.name or f"{args.split}-{method.name}{variant}-{model_tag}-n{len(instances)}"
     out = RESULTS_DIR / f"{run_name}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -133,8 +139,8 @@ def cmd_run(args) -> None:
     todo = [i for i in instances if i.question_id not in done]
     print(f"run {run_name}: {len(instances)} questions, {len(done)} already done, {len(todo)} to go")
 
-    answerer = make_llm(args.answer_model, args.effort, not args.no_fallbacks)
-    judge = make_llm(args.judge_model, args.judge_effort, not args.no_fallbacks)
+    answerer = make_llm(args.answer_model, effort=args.effort, fallbacks=not args.no_fallbacks)
+    judge = make_llm(args.judge_model, effort=args.judge_effort, fallbacks=not args.no_fallbacks)
     lock = threading.Lock()
     with out.open("a") as f, ThreadPoolExecutor(args.workers) as pool:
         futures = {pool.submit(evaluate_one, inst, method, answerer, judge, args.answer_style): inst for inst in todo}
@@ -196,8 +202,9 @@ def report(path: Path, answer_model: str | None = None, judge_model: str | None 
                  total("answer", "output_tokens"))
     jcost = cost(jm, total("judge", "input_tokens"), total("judge", "cache_write_tokens"),
                  total("judge", "cache_read_tokens"), total("judge", "output_tokens"))
-    print(f"cost (list-price equivalent): answer ${acost:.2f} + judge ${jcost:.2f}")
-    fell_back = [r["question_id"] for r in rows if r["answer_model"] != am or r["judge_model"] != jm]
+    print(f"cost (list-price equivalent): answer {_dollars(acost, am)} + judge {_dollars(jcost, jm)}")
+    fell_back = [r["question_id"] for r in rows
+                 if not served_as_requested(am, r["answer_model"]) or not served_as_requested(jm, r["judge_model"])]
     refused = [r["question_id"] for r in rows if r["answer_stop_reason"] == "refusal"]
     if fell_back:
         print(f"served by a fallback model: {len(fell_back)} {fell_back[:5]}")
@@ -205,6 +212,10 @@ def report(path: Path, answer_model: str | None = None, judge_model: str | None 
         print(f"refused: {len(refused)} {refused[:5]}")
     if errors:
         print(f"errored (rerun to retry): {len(errors)}")
+
+
+def _dollars(amount: float | None, model: str) -> str:
+    return f"${amount:.2f}" if amount is not None else f"n/a (no price for {model} in PRICES)"
 
 
 def cmd_estimate(args) -> None:
@@ -215,9 +226,9 @@ def cmd_estimate(args) -> None:
         estimate_tokens(answer_prompt(method.build(i).sessions, i.question_date, i.question)) for i in instances
     ]
     total = sum(tokens)
-    pin, _ = PRICES.get(args.answer_model, (0.0, 0.0))
     print(f"{method.name} on {len(instances)} questions: ~{total / len(tokens):,.0f} prompt tokens/question, "
-          f"~{total / 1e6:.2f}M total, ~${total * pin / 1e6:.2f} answer input on {args.answer_model} "
+          f"~{total / 1e6:.2f}M total, ~{_dollars(cost(args.answer_model, total, 0, 0, 0), args.answer_model)} "
+          f"answer input on {args.answer_model} "
           "(estimate; newer Claude tokenizers can count up to ~1.35x more)")
 
 
@@ -359,7 +370,7 @@ def cmd_extract(args) -> None:
                 tqdm.write(f"{type(e).__name__}: {str(e)[:120]}")
     n1, in1, out1 = store.usage()
     print(f"extracted {n1 - n0} sessions ({failed} failed): {in1 - in0:,} input / {out1 - out0:,} output tokens "
-          f"(API-reported), ~${cost(args.model, in1 - in0, 0, 0, out1 - out0):.2f} list price")
+          f"(API-reported), ~{_dollars(cost(args.model, in1 - in0, 0, 0, out1 - out0), args.model)} list price")
 
 
 def cmd_inspect(args) -> None:
@@ -402,8 +413,8 @@ def main(argv: list[str] | None = None) -> None:
     common(sp)
     sp.add_argument("--n", type=int, default=30, help="stratified sample size (500 = all)")
     sp.add_argument("--seed", type=int, default=0)
-    sp.add_argument("--answer-model", default="claude-opus-5-5", help="'echo' runs offline")
-    sp.add_argument("--judge-model", default="claude-opus-5-5")
+    sp.add_argument("--answer-model", default="claude-opus-5-5", help="model spec, e.g. claude-opus-5-5, openai:gpt-5, ollama:qwen2.5:7b; 'echo' runs offline")
+    sp.add_argument("--judge-model", default="claude-opus-5-5", help="model spec, as for --answer-model")
     sp.add_argument("--effort", default="medium")
     sp.add_argument("--answer-style", default="official", choices=["official", "enumerate"])
     sp.add_argument("--judge-effort", default="low")

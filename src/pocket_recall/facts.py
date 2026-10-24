@@ -124,16 +124,13 @@ def _parse(raw: str, n_messages: int) -> list[Fact]:
 
 class Extractor:
     def __init__(self, store: FactStore, model: str = DEFAULT_MODEL, **request: object):
-        """`request` adds parameters to each API call, e.g. thinking={"type": "disabled"}."""
+        """`model` is a model spec ("claude-haiku-4-5-20251001", "deepseek:deepseek-chat", ...,
+        see pocket_recall.llm); `request` adds parameters to each call, e.g. thinking={"type": "disabled"}."""
+        from .llm import make_llm
+
         self.store = store
         self.model = model
-        self.request = request
-        try:
-            import anthropic
-        except ImportError:
-            raise SystemExit("Fact extraction needs the Anthropic SDK: pip install 'pocket-recall[facts]'") from None
-
-        self.client = anthropic.Anthropic(max_retries=6)
+        self.llm = make_llm(model, effort=None, fallbacks=False, **request)
 
     def extract(self, session_id: str, date: str, user_messages: list[str]) -> list[Fact]:
         """user_messages[i] is the user text of round i. Cached per session and extractor version."""
@@ -142,17 +139,9 @@ class Extractor:
         numbered = "\n\n".join(
             f"[{i + 1}] {text[:MAX_CHARS_PER_MESSAGE]}" for i, text in enumerate(user_messages)
         )
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": PROMPT.format(date=date, messages=numbered)}],
-            **self.request,
-        )
-        raw = "".join(b.text for b in response.content if b.type == "text")
-        facts = _parse(raw, len(user_messages))
-        u = response.usage
-        prompt_tokens = u.input_tokens + (u.cache_creation_input_tokens or 0) + (u.cache_read_input_tokens or 0)
-        self.store.put(session_id, response.model, facts, raw, (prompt_tokens, u.output_tokens))
+        c = self.llm.complete(PROMPT.format(date=date, messages=numbered), max_tokens=4000)
+        facts = _parse(c.text, len(user_messages))
+        self.store.put(session_id, c.model, facts, c.text, (c.input_tokens, c.output_tokens))
         return facts
 
 
@@ -167,7 +156,7 @@ def main() -> None:
 
     p = argparse.ArgumentParser(prog="pocket-recall facts", description=main.__doc__)
     p.add_argument("db", type=Path)
-    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--model", default=DEFAULT_MODEL, help="model spec, e.g. deepseek:deepseek-chat (see README)")
     p.add_argument("--workers", type=int, default=4)
     args = p.parse_args()
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):

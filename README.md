@@ -247,6 +247,26 @@ pocket-recall eval      LongMemEval / LoCoMo harness (needs pocket-recall[eval])
 
 `pocket-recall web --dir ~/.pocket-recall` opens a workbench at http://localhost:8765. It lists every session, searches the original text, and shows exactly what `recall` returns for a question at a given budget and date, in English or Chinese.
 
+## Using other models
+
+Memory itself calls no model. Only the optional `pocket-recall facts` and the `pocket-recall eval` harness do, and both take a model spec in `provider:model` form, so any provider works:
+
+| Spec | Goes to | Configured by |
+|---|---|---|
+| `claude-opus-5-5` (no prefix) or `anthropic:...` | Anthropic API | `ANTHROPIC_API_KEY`, optional `ANTHROPIC_BASE_URL` |
+| `openai:gpt-5` | any OpenAI-compatible Chat Completions endpoint | `OPENAI_API_KEY`, optional `OPENAI_BASE_URL` |
+| `deepseek:...`, `qwen:...`, `moonshot:...`, `openrouter:...` | built-in endpoints of those providers | `<NAME>_API_KEY`, optional `<NAME>_BASE_URL` |
+| `ollama:qwen2.5:7b` | local Ollama at `localhost:11434` | nothing; `OLLAMA_BASE_URL` to move it |
+| `mylab:my-model` | any other server (vLLM, LM Studio, a relay, ...) | `MYLAB_BASE_URL`, optional `MYLAB_API_KEY` |
+| `echo` | nowhere: an offline stand-in for smoke tests | |
+
+```bash
+pocket-recall facts DB --model deepseek:deepseek-chat
+pocket-recall eval run --answer-model openai:gpt-5 --judge-model claude-opus-5-5
+```
+
+Keys are read from the environment (the eval harness also reads the repository's gitignored `.env`) and are only sent to the endpoint they belong to. Costs are printed for models listed in `PRICES` in `eval/run.py`; others report token counts only.
+
 ## Development
 
 ```bash
@@ -261,6 +281,7 @@ uv run pytest
 | `src/pocket_recall/store.py` | `MemoryStore`: SQLite schema, write path, `recall` |
 | `src/pocket_recall/timeparse.py` | Chinese and English time expressions to date ranges |
 | `src/pocket_recall/mcp_server.py`, `hook.py`, `inject.py`, `importers.py` | Integrations |
+| `src/pocket_recall/llm.py` | Provider-switchable model layer for fact extraction and the harness |
 | `src/pocket_recall/eval/` | LongMemEval and LoCoMo harness, paired comparison |
 | `.claude-plugin/`, `.mcp.json`, `hooks/`, `skills/` | The Claude Code plugin |
 
