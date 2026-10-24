@@ -362,3 +362,35 @@ def test_second_pass_reaches_a_fact_through_an_entity(tmp_path):
         core.PRF_WEIGHT = old
     assert "2.4M" in on and "2.4M" not in off
     s.close()
+
+
+def test_structured_excerpt_keeps_table_rows_with_their_header():
+    from pocket_recall.core import excerpt
+
+    reply = "\n".join([
+        "Here are the results of the backtest.", "",
+        "## Returns (research costs)", "",
+        "| version | Bitget 2021-09+ | Binance 2020-21 |",
+        "|---|---|---|",
+        "| original | 58% / -30% | 69% / -39% |",
+        "| new combo | 76% / -19% | 80% / -17% |",
+        "| their live | 131% / -27% | 48% / -40% |", "",
+        "## Notes", "",
+        "- The new combo is better across all three periods and cheaper to run.",
+    ] + [f"Some unrelated filler sentence number {i} about other topics entirely." for i in range(40)])
+    out = excerpt(reply, "what was the new combo's return on Binance 2020-21", 90, scorer="bm25")
+    assert "new combo | 76% / -19% | 80% / -17%" in out          # the answer row survived
+    assert "Binance 2020-21" in out                               # with its header, so the column is clear
+    assert "## Returns" in out                                    # and its section heading
+    assert "filler sentence" not in out                           # the irrelevant tail was dropped
+
+
+def test_structured_units_parse_headings_tables_code():
+    from pocket_recall.core import structured_units
+
+    units = structured_units("# Title\n\ntext one.\n\n```\ncode block\nline2\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |")
+    kinds = [(u.heading, u.text[:12]) for u in units]
+    assert (True, "# Title") in kinds
+    assert any("code block" in u.text and "line2" in u.text for u in units)  # code kept whole
+    row = next(u for u in units if u.text == "| 1 | 2 |")
+    assert row.support and units[row.support[-1]].text == "| a | b |"        # row carries its header

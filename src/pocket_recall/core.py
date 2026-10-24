@@ -22,7 +22,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
-from typing import Protocol, Sequence
+from typing import NamedTuple, Protocol, Sequence
 
 import numpy as np
 
@@ -348,31 +348,145 @@ def _chunks(text: str, chunk_tokens: int) -> tuple[str, ...]:
     return tuple(chunks)
 
 
-def excerpt(text: str, query: str, max_tokens: int, *, scorer: str = "hybrid",
-            embedder: EmbedderLike | None = None) -> str:
-    """The parts of a long message most relevant to `query`, in original order, within `max_tokens`.
+# A retrieval unit inside one message: its own text (what is emitted), the heading/table-header
+# context used only for scoring, and support (heading and table-header units that must come with
+# it so a kept table row stays readable and grounded).
+class Unit(NamedTuple):
+    text: str
+    context: str
+    support: tuple[int, ...]
+    heading: bool
 
-    Real users paste whole résumés and emails; one message can exceed the whole budget.
-    The text is cut into chunks of a few sentences; the opening chunk is always kept for context.
-    """
-    if estimate_tokens(text) <= max_tokens:
-        return text
+
+_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*\S)")
+_BOLD_HEADING = re.compile(r"^\s*\*\*(.+?)\*\*[:：]?\s*$")  # Claude replies use **bold** lines as headers
+_TABLE_SEP = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")  # |---|:--:|
+_LIST_ITEM = re.compile(r"^\s{0,6}([-*+]|\d+[.)])\s+\S")
+_FENCE = re.compile(r"^\s*(```|~~~)")
+
+
+@functools.lru_cache(maxsize=16384)
+def structured_units(text: str) -> tuple[Unit, ...]:
+    """Split a message into leaf units (paragraphs, table rows, list items, code blocks), each
+    carrying the headings and table header above it. Markdown-ish, deterministic, no model call."""
+    units: list[Unit] = []
+    headings: list[tuple[int, int]] = []  # (level, unit index) still in scope
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        ctx = lambda extra="": " / ".join(units[h].text.strip("#* ") for _, h in headings) + extra
+        sup = lambda: tuple(h for _, h in headings)
+        m = _HEADING.match(line) or _BOLD_HEADING.match(line)
+        if m and line.strip():
+            level = len(m.group(1)) if _HEADING.match(line) else 6
+            while headings and headings[-1][0] >= level:
+                headings.pop()
+            units.append(Unit(line.strip(), ctx(), sup(), True))  # context = ancestor headings only
+            headings.append((level, len(units) - 1))
+            i += 1
+        elif _FENCE.match(line):  # code block kept whole
+            block = [line]
+            i += 1
+            while i < len(lines) and not _FENCE.match(lines[i]):
+                block.append(lines[i]); i += 1
+            if i < len(lines):
+                block.append(lines[i]); i += 1
+            units.append(Unit("\n".join(block), ctx(), sup(), False))
+        elif "|" in line and line.count("|") >= 2:  # table: header then rows, each row carries the header
+            header_idx = len(units)
+            units.append(Unit(line.strip(), ctx(), sup(), True))
+            i += 1
+            while i < len(lines) and "|" in lines[i] and lines[i].count("|") >= 2:
+                if not _TABLE_SEP.match(lines[i]):
+                    units.append(Unit(lines[i].strip(), ctx("\n" + line.strip()), sup() + (header_idx,), False))
+                i += 1
+        elif _LIST_ITEM.match(line):
+            units.append(Unit(line.strip(), ctx(), sup(), False))
+            i += 1
+        elif not line.strip():
+            i += 1
+        else:  # a paragraph: consecutive plain lines, split into sentences if long
+            para = [line]
+            i += 1
+            while i < len(lines) and lines[i].strip() and not (
+                _HEADING.match(lines[i]) or _BOLD_HEADING.match(lines[i]) or _FENCE.match(lines[i])
+                or _LIST_ITEM.match(lines[i]) or ("|" in lines[i] and lines[i].count("|") >= 2)
+            ):
+                para.append(lines[i]); i += 1
+            joined = " ".join(s.strip() for s in para)
+            pieces = chunk_text(joined, EXCERPT_CHUNK_TOKENS) if estimate_tokens(joined) > EXCERPT_CHUNK_TOKENS else [joined]
+            for p in pieces:
+                units.append(Unit(p, ctx(), sup(), False))
+    return tuple(units)
+
+
+STRUCTURED_EXCERPT = True
+
+
+def _excerpt_flat(text: str, query: str, max_tokens: int, scorer: str, embedder: EmbedderLike | None) -> str:
+    """The 0.2 excerpt: sentence chunks, no structure. Kept for the ablation and as a fallback."""
     chunks = chunk_text(text, EXCERPT_CHUNK_TOKENS)
     keep, used = {0}, estimate_tokens(chunks[0])
     for i in rank(chunks, query, scorer, embedder):
-        cost = estimate_tokens(chunks[i]) + 1
-        if i not in keep and used + cost <= max_tokens:
-            keep.add(i)
-            used += cost
+        c = estimate_tokens(chunks[i]) + 1
+        if i not in keep and used + c <= max_tokens:
+            keep.add(i); used += c
     parts, prev = [], -1
     for i in sorted(keep):
         if prev >= 0 and i != prev + 1:
             parts.append("…")
-        parts.append(chunks[i])
-        prev = i
+        parts.append(chunks[i]); prev = i
     if prev != len(chunks) - 1:
         parts.append("…")
     return " ".join(parts)
+
+
+def excerpt(text: str, query: str, max_tokens: int, *, scorer: str = "hybrid",
+            embedder: EmbedderLike | None = None) -> str:
+    """The parts of a long message most relevant to `query`, in original order, within `max_tokens`.
+
+    Real users paste whole résumés and emails, and Claude's own replies put the answer in a table
+    row or under a heading. The message is parsed into structured units; each is scored with its
+    heading and table-header context, so a row like "| new | 76% | 80% |" is matched through the
+    "Binance 2020-21" in its header, and kept together with that header. The opening unit is always
+    kept for context.
+    """
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    if not STRUCTURED_EXCERPT:
+        return _excerpt_flat(text, query, max_tokens, scorer, embedder)
+    units = structured_units(text)
+    if not units:
+        return text[: int(max_tokens * CHARS_PER_TOKEN)]
+    order = rank([u.context + "\n" + u.text for u in units], query, scorer, embedder)
+    cost = [estimate_tokens(u.text) + 1 for u in units]
+    keep: set[int] = set()
+    used = 0
+
+    def take(i: int) -> None:
+        nonlocal used
+        for j in (*units[i].support, i):
+            if j not in keep:
+                keep.add(j); used += cost[j]
+
+    take(0)
+    for i in order:
+        need = sum(cost[j] for j in (*units[i].support, i) if j not in keep)
+        if i not in keep and used + need <= max_tokens:
+            take(i)
+    # a heading with no kept content under it is noise: drop it
+    kept_content = {i for i in keep if not units[i].heading}
+    keep = {i for i in keep if not units[i].heading or any(c > i and c in kept_content for c in kept_content)}
+    parts, prev = [], -1
+    for i in sorted(keep):
+        if prev >= 0 and i != prev + 1 and not units[prev].heading:
+            parts.append("…")
+        parts.append(units[i].text)
+        prev = i
+    if prev != len(units) - 1:
+        parts.append("…")
+    return "\n".join(parts)
 
 
 def select(
