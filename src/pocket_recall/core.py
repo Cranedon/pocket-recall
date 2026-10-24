@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -195,6 +196,113 @@ def relevance(texts: list[str], query: str, embedder: EmbedderLike) -> float:
     return float(scores.max()) + GATE_COVER_WEIGHT * cover
 
 
+# Topical segments (after SeCom, ICLR 2025, and CPP, SIGDIAL 2026): consecutive rounds about one
+# topic, split where a user turn drifts away from the segment so far. Short acknowledgements
+# ("ok", "改好了") never start a segment, so a reply that answered "ok, do it" stays attached to
+# the turns that set its topic. No model call: the user-turn vectors are already cached.
+SEGMENT_SIM = 0.35
+SEGMENT_MIN_CHARS = 12
+SEGMENT_MAX_ROUNDS = 10
+SEGMENT_MIN_ROUNDS = 1  # a segment is not split before it has this many rounds
+SEGMENT_WEIGHT = 0.3  # weight of the segment ranking in the fused round ranking; 0 = off
+
+
+def segment_rounds(rounds: Sequence[Round], embedder: EmbedderLike, sim: float | None = None,
+                   max_rounds: int | None = None) -> list[int]:
+    """Segment id of every round; segments never cross sessions."""
+    sim = SEGMENT_SIM if sim is None else sim
+    max_rounds = SEGMENT_MAX_ROUNDS if max_rounds is None else max_rounds
+    vecs = embedder.passages([r.user_text for r in rounds]) if rounds else []
+    ids: list[int] = []
+    seg, size, centroid, session = -1, 0, None, None
+    for i, r in enumerate(rounds):
+        short = len(r.user_text.strip()) < SEGMENT_MIN_CHARS
+        drift = (not short and centroid is not None
+                 and float(vecs[i] @ centroid) / (float(np.linalg.norm(centroid)) or 1.0) < sim)
+        if r.session_idx != session or size >= max_rounds or (drift and size >= SEGMENT_MIN_ROUNDS):
+            seg, size, centroid, session = seg + 1, 0, None, r.session_idx
+        if not short or centroid is None:
+            centroid = vecs[i].copy() if centroid is None else centroid + vecs[i]
+        size += 1
+        ids.append(seg)
+    return ids
+
+
+def rank_segments(rounds: Sequence[Round], seg: list[int], query: str, embedder: EmbedderLike) -> list[int]:
+    """Segment ids, best first: BM25 over the segment's user turns fused with the cosine of
+    their centroid (no new embeddings)."""
+    n = max(seg) + 1 if seg else 0
+    texts = [""] * n
+    vecs = embedder.passages([r.user_text for r in rounds])
+    cents = np.zeros((n, vecs.shape[1]), dtype=np.float32)
+    for i, s in enumerate(seg):
+        texts[s] += "\n" + rounds[i].user_text
+        cents[s] += vecs[i]
+    cents /= np.maximum(np.linalg.norm(cents, axis=1, keepdims=True), 1e-9)
+    dense = [int(i) for i in np.argsort(-(cents @ embedder.query(query)))]
+    bm = bm25_rank(texts, query)
+    return rrf(bm + [i for i in range(n) if i not in set(bm)], dense,
+               weights=[0.3 if has_cjk(query) else 1.0, 1.0])
+
+
+# Entity-driven second pass (after SmartSearch, 2026): names, numbers and code identifiers that
+# are rare in the store, absent from the question and present in the best rounds of the first
+# pass are added to the question for a second BM25 pass, so a fact that connects to the question
+# only through the first hop can be found. No model call. Only entity-like words count: with any
+# rare word (pseudo-relevance feedback), casual words such as "wanna" or "believes" drifted the
+# query and LoCoMo multi-hop recall at 8k fell from 54.4% to 49.0% on the dev half.
+PRF_WEIGHT = 0.5  # weight of the second pass in the fused ranking; 0 = off
+PRF_DOCS = 5
+PRF_TERMS = 6
+PRF_MAX_DF = 0.05  # only entities found in at most this share of rounds
+
+_ENTITY = re.compile(
+    r"(?<![\w])(?:(?:(?<=[a-z,;] )|(?<=[\u4e00-\u9fff] )|(?<=[\u4e00-\u9fff]))"  # mid-sentence only:
+    r"[A-Z][a-zA-Z0-9]+(?:[ -][A-Z][a-zA-Z0-9]+)*"            # names, not "Hey"/"Glad"
+    r"|[A-Za-z]*\d[\w.,%×-]*"                                 # with digits: v2b, 36,978, 4.78
+    r"|[a-z]+(?:[_./][a-zA-Z0-9]+)+|[a-z]+[A-Z][a-zA-Z0-9]*)"  # code: snake_case, a.b.c, camelCase
+)
+
+
+@functools.lru_cache(maxsize=262144)
+def _entities(text: str) -> frozenset[str]:
+    out = (m.group(0).strip(".,%-") for m in _ENTITY.finditer(text))
+    return frozenset(w for w in out if len(w) > 1)
+
+
+@functools.lru_cache(maxsize=262144)
+def _lower(text: str) -> str:
+    return text.lower()
+
+
+def expansion_terms(rounds: Sequence[Round], round_order: Sequence[int], query: str,
+                    docs: int | None = None, n_terms: int | None = None, max_df: float | None = None) -> list[str]:
+    """Entity-like words to add to `query`, best first, from the top `docs` rounds of `round_order`."""
+    docs = PRF_DOCS if docs is None else docs
+    n_terms = PRF_TERMS if n_terms is None else n_terms
+    max_df = PRF_MAX_DF if max_df is None else max_df
+    n = len(rounds)
+    if n < 10:
+        return []
+    q = query.lower()
+    asked = {w[:5] for w in re.findall(r"[a-z0-9]{4,}", q)}  # skip "recipe" when "recipes" was asked
+    texts: list[str] | None = None
+    df: dict[str, int] = {}
+    score: dict[str, float] = {}
+    for pos, rid in enumerate(list(dict.fromkeys(round_order))[:docs]):
+        for e in _entities(rounds[rid].text):
+            el = e.lower()
+            if el in q or el[:5] in asked:
+                continue
+            if el not in df:
+                texts = texts or [_lower(r.text) for r in rounds]
+                df[el] = sum(el in t for t in texts)
+            if not 0 < df[el] <= max(2, max_df * n):
+                continue
+            score[e] = score.get(e, 0.0) + math.log(n / df[el]) / (pos + 1)
+    return [w for w, _ in sorted(score.items(), key=lambda kv: -kv[1])[:n_terms]]
+
+
 def rank(texts: list[str], query: str, scorer: str = "hybrid", embedder: EmbedderLike | None = None,
          reranker: RerankerLike | None = None) -> list[int]:
     """Every index exactly once, best first. BM25 skips texts with no word overlap; those trail.
@@ -286,6 +394,8 @@ def select(
     reply_lane: float = 0.0,
     fill_replies: bool = False,
     max_reply_tokens: int | None = None,
+    segment_weight: float | None = None,
+    prf_weight: float | None = None,
 ) -> dict[int, list]:
     """Pick rounds for `query` within `budget` tokens: round index -> turns to include.
 
@@ -367,6 +477,19 @@ def select(
         # Soft boost: rounds dated in the window get an extra RRF vote, so they rise
         # without burying strong content matches from just outside it.
         ranked = rrf(ranked, [k for k in ranked if not outside(owners[k])], weights=[1.0, window_weight])
+    segment_weight = SEGMENT_WEIGHT if segment_weight is None else segment_weight
+    prf_weight = PRF_WEIGHT if prf_weight is None else prf_weight
+    if segment_weight and embedder is not None and not window_strict and rounds:
+        seg = segment_rounds(rounds, embedder)
+        seg_pos = {sid: i for i, sid in enumerate(rank_segments(rounds, seg, query, embedder))}
+        own = {k: i for i, k in enumerate(ranked)}
+        ranked = rrf(ranked, sorted(ranked, key=lambda k: (seg_pos[seg[owners[k]]], own[k])),
+                     weights=[1.0, segment_weight])
+    if prf_weight and not window_strict:
+        terms = expansion_terms(rounds, [owners[k] for k in ranked], query)
+        if terms:
+            second = bm25_rank(texts, query + " " + " ".join(terms))
+            ranked = rrf(ranked, second + [k for k in ranked if k not in set(second)], weights=[1.0, prf_weight])
 
     # Whole rounds, for answers that live in an assistant reply. English: BM25 on the full
     # round text. Chinese: that BM25 is too noisy, so take the best rounds of the main ranking.

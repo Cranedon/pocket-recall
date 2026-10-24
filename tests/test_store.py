@@ -308,3 +308,57 @@ def test_reply_lane_finds_answers_written_by_the_assistant(tmp_path):
     assert "7,619" in on.recall(question, budget_tokens=4000).text
     assert "7,619" not in on.recall(question, budget_tokens=2000).text  # no lane below 4k tokens
     off.close(), on.close()
+
+
+def test_segments_keep_acknowledgements_with_their_topic(tmp_path):
+    from pocket_recall.core import segment_rounds, split_rounds
+
+    s = MemoryStore(tmp_path / "m.db")
+    s.add_session([
+        {"role": "user", "content": "The relay is acting strange, is it tampering with my token usage?"},
+        {"role": "assistant", "content": "Let me look at the usage numbers."},
+        {"role": "user", "content": "ok"},  # short: continues the topic
+        {"role": "assistant", "content": "It injects a hidden system prompt."},
+        {"role": "user", "content": "What is a good recipe for vegan banana bread with walnuts?"},
+        {"role": "assistant", "content": "Here is one."},
+    ], started_at="2026-01-01")
+    s.add_session(chat("Another session about the relay usage numbers."), started_at="2026-01-02")
+    rounds = split_rounds([x.messages for x in s._sessions()])
+    seg = segment_rounds(rounds, s._embedder)
+    assert seg[0] == seg[1]          # "ok" stays with the relay question
+    assert seg[2] != seg[1]          # banana bread starts a new topic
+    assert seg[3] != seg[2]          # segments never cross sessions
+    s.close()
+
+
+def test_entity_terms_skip_sentence_starts_and_asked_words():
+    from pocket_recall.core import Round, expansion_terms
+
+    class T:
+        def __init__(self, role, content):
+            self.role, self.content = role, content
+
+    rounds = [Round(0, i, [T("user", f"Hey there, nothing much happened on day {i}.")]) for i in range(30)]
+    rounds[3] = Round(0, 3, [T("user", "Glad you asked: my sister founded Lumora and it uses lumora_api v2b.")])
+    terms = expansion_terms(rounds, [3], "What did my sister found?")
+    assert "Lumora" in terms and "lumora_api" in terms and "v2b" in terms
+    assert "Glad" not in terms and "Hey" not in terms
+
+
+def test_second_pass_reaches_a_fact_through_an_entity(tmp_path):
+    s = MemoryStore(tmp_path / "m.db", scorer="bm25", full_rounds=0)
+    for day in range(1, 29):
+        s.add_session(chat(f"Day {day}: I cooked pasta and read a novel about the sea."), started_at=f"2026-02-{day:02d}")
+    s.add_session(chat("My sister just founded a startup called Lumora."), started_at="2026-03-01")
+    s.add_session(chat("Big news: Lumora closed a seed round of 2.4M dollars."), started_at="2026-03-05")  # no word of the question
+    question = "How much money did my sister's startup raise?"
+    # in BM25-only mode the second pass lifts the fact from 30th to 17th of 30 rounds
+    on = s.recall(question, budget_tokens=900).text
+    import pocket_recall.core as core
+    old, core.PRF_WEIGHT = core.PRF_WEIGHT, 0.0
+    try:
+        off = s.recall(question, budget_tokens=900).text
+    finally:
+        core.PRF_WEIGHT = old
+    assert "2.4M" in on and "2.4M" not in off
+    s.close()

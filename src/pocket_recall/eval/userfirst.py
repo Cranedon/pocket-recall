@@ -41,7 +41,8 @@ def parse_date(s: str) -> date:
 
 class UserFirstRetrieval:
     def __init__(self, budget_tokens: int = 8000, scorer: str = "hybrid", full_rounds: int = 3, facts: bool = False,
-                 time: bool = False, assistant: bool = False, lane: bool = False, fill: bool = False):
+                 time: bool = False, assistant: bool = False, lane: bool = False, fill: bool = False,
+                 seg: bool = False, prf: bool = False):
         self.budget = budget_tokens
         self.scorer = scorer
         self.full_rounds = full_rounds
@@ -50,8 +51,11 @@ class UserFirstRetrieval:
         self.assistant = assistant
         self.lane = lane
         self.fill = fill
+        self.seg = seg
+        self.prf = prf
         flags = (("facts-" if facts else "") + ("time-" if time else "") + ("asst-" if assistant else "")
-                 + ("lane-" if lane else "") + ("fill-" if fill else ""))
+                 + ("lane-" if lane else "") + ("fill-" if fill else "") + ("seg-" if seg else "")
+                 + ("prf-" if prf else ""))
         self.name = f"userfirst-{flags}{scorer}-f{full_rounds}-{budget_tokens}"
 
     def fact_keys(self, inst: Instance, rounds) -> list[tuple[str, int]]:
@@ -103,6 +107,8 @@ class UserFirstRetrieval:
             assistant_keys=self.assistant,
             reply_lane=REPLY_LANE_SHARE if self.lane else 0.0,
             fill_replies=self.fill,
+            segment_weight=None if self.seg else 0.0,
+            prf_weight=None if self.prf else 0.0,
         )
         by_session: dict[int, list] = {}
         for rid in sorted(picked, key=lambda r: (rounds[r].session_idx, rounds[r].round_idx)):

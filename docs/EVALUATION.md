@@ -336,7 +336,38 @@ The two-signal fusion scores slightly higher, but it ignores what the user said,
 
 **Caveat.** The 24 later-written questions were inspected to diagnose this, so they are no longer held out for this change. The development questions and LongMemEval show the same trend, and nothing at 8k or below changed.
 
-## 10. Reproducing
+## 10. Topical segments and an entity-driven second pass
+
+Two ideas from the literature, both kept free of model calls:
+
+- **Topical segments** ([SeCom](https://proceedings.iclr.cc/paper_files/paper/2025/hash/e56f394bbd4f0ec81393d767caa5a31b-Abstract-Conference.html), ICLR 2025; [CPP](https://aclanthology.org/2026.sigdial-1.55.pdf), SIGDIAL 2026: segments of a few turns beat both single turns and whole sessions). Within a session, a new segment starts when a user turn's cosine to the segment's centroid drops below 0.35, at most 10 rounds; user turns under 12 characters never start one. A segment is ranked by BM25 over its user turns fused with its centroid's cosine, and that ranking is fused into the round ranking with weight 0.3. The user-turn vectors are already cached, so no new embedding is needed.
+- **Entity-driven second pass** ([SmartSearch](https://arxiv.org/abs/2603.15599), 2026: deterministic entity expansion and ranking reach 93.5% on LoCoMo). From the 5 best rounds of the first pass, up to 6 entity-like words: capitalised words in mid-sentence, tokens with digits, code identifiers, Latin terms inside Chinese. They must be absent from the question and found in at most 5% of rounds. They go into a second BM25 pass, fused with weight 0.5.
+
+### Development sweep
+
+| Setting | Real-user dev (94) 2k / 4k / 8k | LoCoMo dev 2k / 8k (multi-hop 8k) | LongMemEval 2k / 8k |
+|---|---|---|---|
+| Before | 48 / 70 / 74 | 67.8% / 84.3% (54.4%) | 57.4% / 96.8% |
+| Segments 0.3, split 0.35 | 49 / 71 / 75 | 71.5% / 88.1% (60.5%) | 56.0% / 97.2% |
+| Segments 1.0, split 0.35, at least 3 rounds | 51 / 70 / 73 | 75.2% / 88.8% (61.2%) | 54.5% / 96.6% |
+| Second pass on any rare word, 0.5 | 52 / 70 / 75 | 67.9% / 83.4% (49.0%) | 57.7% / 96.2% |
+| Second pass on entities only, 0.5 | 52 / 71 / 78 | 67.3% / 84.0% (53.7%) | 57.7% / 96.0% |
+| **Segments 0.3 + entity second pass 0.5 (chosen)** | **52 / 71 / 77** | **70.3% / 87.1% (57.8%)** | **57.7% / 96.8%** |
+
+Segments help LoCoMo most, but stronger segment weights cost LongMemEval at 2k: its sessions are single-topic, so a matching segment pushes forward rounds that are not evidence. The second pass helps real users most, where the entities are tools, URLs and numbers. Its generic form, any word rare in the store, added casual words ("wanna", "believes") and drifted the query: LoCoMo multi-hop at 8k fell to 49.0%. Restricting it to entity-like words fixed that. The chosen combination is the only one that went down on none of the three development sets.
+
+### Held-out results (run once)
+
+| | LoCoMo test half 2k / 8k | multi-hop 8k | open-domain 8k | Later-written real-user questions, set 2 (24) 2k / 4k / 8k / 32k |
+|---|---:|---:|---:|---:|
+| Before | 70.7% / 85.2% | 60.6% | 45.2% | 5 / 15 / 16 / 23 |
+| **Segments + entity second pass** | **72.6% / 88.1%** | **65.2%** | **52.4%** | 5 / **16** / **17** / 23 |
+
+Set 2 was written from sessions no earlier question used (a trading-strategy review continued after the first set, and the pocket-recall work itself), before any tuning in this round, and was moved to its own directory so no development run could read it. One of its questions changed, for the better. 19 of the 24 answers sit in assistant replies, which explains the 5 at 2k: below 4k only what the user said is packed.
+
+**Cost.** Recall at 8k on a 665k-token store: 0.56 s instead of 0.36 s; unchanged at 2k.
+
+## 11. Reproducing
 
 | What | Command | Cost |
 |---|---|---|

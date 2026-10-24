@@ -88,6 +88,8 @@ These design choices come from measurements, not guesses (details in the [evalua
 - **Time awareness.** "What did I do last week" becomes a date range that adds weight to sessions inside it, without hiding relevant ones outside it. A question that only asks about time ("what did I do yesterday?") orders strictly by that period.
 - **Excerpts, not truncation.** A pasted 3,000-token resume would eat a small budget. Long turns keep their opening and the passages closest to the question, and the full text stays in the database.
 - **A larger budget gets closer to the whole history.** Small budgets are a trade-off: what you said comes first, and long turns are excerpted. Once every relevant thing you said fits, the rest of the budget makes rounds whole, the replies Claude wrote and documents you pasted. The order fuses three signals: the ranking of what you said, the best-matching piece of each reply, and BM25 over the whole round. With a budget as large as the store, recall returns everything verbatim.
+- **Topical segments.** Consecutive rounds about one topic form a segment, split where a user turn drifts away from it; "ok" or "改好了" never starts one. Segments are ranked as a whole and fused into the round ranking, so "ok, do it" borrows the topic of the turns before it. No model call (after SeCom and CPP).
+- **An entity-driven second pass.** Names, numbers and code identifiers that are rare in your history, missing from the question and present in the best first-pass rounds go into a second keyword pass, so a fact linked to the question only through a name can still be found. No model call (after SmartSearch).
 - **A reply lane for what the assistant concluded.** In coding sessions the answer is often in Claude's reply ("the relay injects a hidden system prompt"), after a user turn like "ok, do it". From 4k tokens on, when a reply matches the question better than anything you said, 15% of the budget goes to the best-matching pieces of replies, each with the user turn that led to it. It is kept apart from the user-first ranking, so a wrong pick costs at most that share.
 
 ### Automatic injection
@@ -177,6 +179,18 @@ Every question that changed got better. The lane does not cost LoCoMo anything (
 | LoCoMo test half (held out, 730 q) | **97.3%** | **6.6%** | 62.1% |
 
 Replaying real Claude Code sessions through the hook, 40% of prompts got an injection, at about 500 tokens each (200 per prompt on average). The hook adds 0.1–0.3 s to a prompt.
+
+### 0.2: topical segments and an entity-driven second pass
+
+Tuned on development data only (LongMemEval, the LoCoMo dev half, and 94 real-user questions), then run once on held-out data:
+
+| LoCoMo test half (730 q), evidence recall | 2k | 8k | multi-hop 8k | open-domain 8k |
+|---|---:|---:|---:|---:|
+| Raw BM25 | 62.5% | 76.6% | 46.2% | 33.3% |
+| Before (reply lane only) | 70.7% | 85.2% | 60.6% | 45.2% |
+| **With segments and second pass** | **72.6%** | **88.1%** | **65.2%** | **52.4%** |
+
+On a second set of 24 real-user questions written before this round, from sessions none of the earlier questions used: 5 / 15 / 16 → 5 / 16 / 17 at 2k / 4k / 8k; one question improved and none got worse. On LongMemEval nothing went down (57.4% → 57.7% at 2k, 96.8% at 8k).
 
 ### Larger budgets
 

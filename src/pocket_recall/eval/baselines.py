@@ -93,10 +93,10 @@ def make_method(name: str, budget: int):
 
         parts = name.split("-")[1:]
         flags = set()
-        while parts and parts[0] in ("facts", "time", "asst", "lane", "fill"):
+        while parts and parts[0] in ("facts", "time", "asst", "lane", "fill", "seg", "prf"):
             flags.add(parts.pop(0))
         scorer = parts[0] if parts else "hybrid"
         full = int(parts[1][1:]) if len(parts) > 1 else 3
         return UserFirstRetrieval(budget, scorer, full, "facts" in flags, "time" in flags, "asst" in flags,
-                                  "lane" in flags, "fill" in flags)
+                                  "lane" in flags, "fill" in flags, "seg" in flags, "prf" in flags)
     raise ValueError(f"unknown method {name!r}")
