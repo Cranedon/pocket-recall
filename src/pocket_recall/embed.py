@@ -51,6 +51,7 @@ class Embedder:
         self.model_name = model
         self._model = None
         self._queries: dict[str, np.ndarray] = {}  # one recall ranks many excerpts against the same query
+        self._vectors: dict[str, np.ndarray] = {}  # passages already read from disk, for a long-running server
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(cache_path, check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS emb (k TEXT PRIMARY KEY, v BLOB)")
@@ -69,9 +70,10 @@ class Embedder:
     def passages(self, texts: list[str]) -> np.ndarray:
         """Unit-normalised vectors for passages, computing only the ones not cached yet."""
         keys = [_key(t, self.model_name) for t in texts]
-        found: dict[str, np.ndarray] = {}
-        for i in range(0, len(keys), 900):
-            chunk = keys[i : i + 900]
+        found: dict[str, np.ndarray] = {k: self._vectors[k] for k in keys if k in self._vectors}
+        unread = [k for k in dict.fromkeys(keys) if k not in found]
+        for i in range(0, len(unread), 900):
+            chunk = unread[i : i + 900]
             q = f"SELECT k, v FROM emb WHERE k IN ({','.join('?' * len(chunk))})"
             found.update((k, np.frombuffer(v, dtype=np.float32)) for k, v in self.db.execute(q, chunk))
         missing = list({k: t for k, t in zip(keys, texts) if k not in found}.items())
@@ -85,6 +87,7 @@ class Embedder:
             self.db.executemany("INSERT OR REPLACE INTO emb VALUES (?, ?)", rows)
             self.db.commit()
             found.update((k, np.frombuffer(b, dtype=np.float32)) for k, b in rows)
+        self._vectors.update(found)
         return _normalise(np.stack([found[k] for k in keys])) if keys else np.zeros((0, 0), np.float32)
 
     def query(self, text: str) -> np.ndarray:

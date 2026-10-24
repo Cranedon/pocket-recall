@@ -88,14 +88,15 @@ def make_method(name: str, budget: int):
     if name == "bm25":
         return BM25Retrieval(budget)
     if name.startswith("userfirst"):
-        # userfirst[-facts][-time][-asst][-<scorer>[-f<full rounds>]], e.g. userfirst-time-hybrid-f3
+        # userfirst[-facts][-time][-asst][-lane][-fill][-<scorer>[-f<full rounds>]], e.g. userfirst-time-hybrid-f3
         from .userfirst import UserFirstRetrieval
 
         parts = name.split("-")[1:]
         flags = set()
-        while parts and parts[0] in ("facts", "time", "asst"):
+        while parts and parts[0] in ("facts", "time", "asst", "lane", "fill"):
             flags.add(parts.pop(0))
         scorer = parts[0] if parts else "hybrid"
         full = int(parts[1][1:]) if len(parts) > 1 else 3
-        return UserFirstRetrieval(budget, scorer, full, "facts" in flags, "time" in flags, "asst" in flags)
+        return UserFirstRetrieval(budget, scorer, full, "facts" in flags, "time" in flags, "asst" in flags,
+                                  "lane" in flags, "fill" in flags)
     raise ValueError(f"unknown method {name!r}")

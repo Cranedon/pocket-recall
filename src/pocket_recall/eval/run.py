@@ -258,7 +258,8 @@ def cmd_bench(args) -> None:
 
     userfirst._embedder = Embedder(data.DATA_DIR / "embeddings.sqlite", args.embed_model)
     datasets = {"LongMemEval-S (development set)": lambda: (data.load("s"), 0),
-                "LoCoMo (held out)": locomo.load}
+                "LoCoMo dev half": lambda: locomo.load("dev"),
+                "LoCoMo test half (held out)": lambda: locomo.load("test")}
     out = [f"Evidence recall: share of questions whose evidence turns all fit in the context. "
            f"Embedding model `{args.embed_model}`; abstention questions excluded.\n"]
     for title, loader in datasets.items():
@@ -380,6 +381,11 @@ def _load_dotenv() -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["inject"]:
+        from .inject_check import main as inject_main
+
+        return inject_main(argv[1:])
     _load_dotenv()
     p = argparse.ArgumentParser(prog="pocket-recall eval")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -426,7 +432,7 @@ def main(argv: list[str] | None = None) -> None:
     sp.add_argument("--methods", nargs="+", default=BENCH_METHODS)
     sp.add_argument("--budgets", nargs="+", type=int, default=[2000, 8000])
     sp.add_argument("--embed-model", default=STORE_EMBED_MODEL, help="default: the store's default model")
-    sp.add_argument("--only", nargs="+", help="datasets to run, e.g. locomo")
+    sp.add_argument("--only", nargs="+", help="datasets whose title contains this, e.g. 'locomo dev'")
     sp.add_argument("--out", type=Path, help="also write the markdown table here")
 
     sp = sub.add_parser("extract", help="write-time fact extraction for the selected questions' sessions")

@@ -15,7 +15,7 @@ This is how pocket-recall was measured, what helped, what did not, and where the
 | Dataset | Role | Size | History per question |
 |---|---|---|---|
 | [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) (cleaned) | Development set: every design choice was made on it | 500 questions, 6 abilities + abstention | 115k–177k tokens, ~50 sessions |
-| [LoCoMo](https://github.com/snap-research/locomo) | Held out: never looked at while tuning | 10 conversations, 1,977 questions (9 dropped: their evidence ids match no utterance) | 18k–37k tokens, 19–32 sessions |
+| [LoCoMo](https://github.com/snap-research/locomo) | Held out in 0.1. From 0.2 split by conversation: the 5 with the smallest `sha1(sample_id)` are the dev half, the other 5 the test half, read once per release | 10 conversations, 1,977 questions (9 dropped: their evidence ids match no utterance); dev 801, test 730 non-abstention | 18k–37k tokens, 19–32 sessions |
 
 In LoCoMo, two people talk to each other. Every utterance becomes one turn ("Name: text"), and the dialog ids that a question cites become its evidence turns. The category names follow the evaluation code of Mem0 and Zep, which most published LoCoMo numbers use.
 
@@ -215,7 +215,128 @@ The question sets were written by reading the conversations and checked by wheth
 
 Because the questions shaped the code, they are a development aid, not a benchmark, and the data is not redistributed. Users with trauma, illness or legal matters were excluded when choosing people.
 
-## 8. Reproducing
+## 8. 0.2: reply lane and automatic injection
+
+### Discipline
+
+- **Development data:** LongMemEval-S, the LoCoMo dev half, and the 70 real-user questions that shaped 0.1.
+- **Held out:** the LoCoMo test half, and 24 new real-user questions written *before any 0.2 tuning* from recent Claude Code sessions that no earlier question used (a backend architecture project, a trading-strategy review, a video project). 18 of them are answered only in an assistant reply, 6 in a user turn. The expected words were checked to exist in the store and not to appear in the question. Both sets were run once, after every default below was fixed.
+
+### Diagnosis: why answers in assistant replies were lost
+
+On the 7 development questions answered in a reply, the piece holding the answer ranked **1st of 1,914 reply pieces for 2 of them** and 6th for another. Retrieval was not the main problem; packing was. 0.1's experiment mixed reply pieces into the main ranking, where they pushed out the user's own turns. On the development questions, with 0.1.2's token estimate:
+
+| Development real-user questions (70) | 2k | 4k | 8k |
+|---|---:|---:|---:|
+| No reply pieces | 43 | 52 | 57 |
+| Reply pieces mixed into the main ranking (0.1 experiment) | 49 | — | 59 (5 questions lost) |
+| Reply lane, 10% of budget | 48 | — | 59 |
+| Reply lane, 15% | 51 | — | 60 |
+| Reply lane, 25% | 51 | — | 60 |
+| **Reply lane 15%, only from 4k, only when a reply matches better than any user turn (default)** | 43 | 57 | 60 |
+
+Prefixing each reply piece with the user turn of its round did not help: when the user had said something informative it lifted the answer's rank (135 → 27), but after "ok" or "use claude-sonnet-5" it pushed it down (6 → 34).
+
+**Why the lane starts at 4k.** On a LongMemEval subset (106 questions: all 56 single-session-assistant ones and 50 from other categories), the lane cost 6 questions at 2k, 1 at 4k (multi-session) and none at 8k. LongMemEval's answers sit in user turns, so the lane's share is pure cost there. Making it open only when a reply matches better than any user turn did not fix 2k: LongMemEval's assistant writes long, descriptive replies that often match better anyway. At 1k with the injection gate, the lane lowered the real-user score from 28 to 25. So below 4k every token stays with the user's own words.
+
+### Choosing the injection gate
+
+The gate needs to say whether memory holds something about the prompt. Positives: a question against its own history. Negatives: the same question against another question's history (LongMemEval) or another conversation (LoCoMo dev), which has the same size and style but not the answer.
+
+| Signal | AUC LongMemEval | AUC LoCoMo dev |
+|---|---:|---:|
+| best cosine | 0.84 | 0.98 |
+| best cosine minus mean of top 20 | 0.79 | 0.72 |
+| share of content words in the best 5 | 0.89 | 0.96 |
+| **best cosine + 0.3 × content-word share (used)** | **0.89** | **0.99** |
+
+| Threshold | LongMemEval: fires with / without memory | LoCoMo dev | Development real-user questions answered by 1k injection (39 without a gate) |
+|---|---:|---:|---:|
+| 0.50 | 89% / 31% | 100% / 32% | 37 |
+| 0.55 | 81% / 21% | 100% / 18% | 34 |
+| **0.60 (default)** | **72% / 13%** | **97% / 10%** | **32** |
+| 0.65 | 63% / 7% | 94% / 3% | 28 |
+
+The real-user questions all need memory, so they show only the cost of a high threshold. The cost of a low one shows in real prompts. With only the gate, 49% (Claude Code sessions) to 94% (a WildChat job seeker who rewrote one profile dozens of times) of prompts would get an injection, because real users keep returning to related topics. The second rule, never re-inject in a session and stay quiet when the best match is not new, brought the Claude Code replay down to 37% of prompts at about 500 tokens each.
+
+### Held-out results
+
+| Held-out real-user questions (24) | 2k | 4k | 8k |
+|---|---:|---:|---:|
+| 0.1.2 | 5 | 7 | 9 |
+| **0.2** | 5 | **13** | **14** |
+| ↳ answer in an assistant reply (18) | 0 → 0 | 2 → 8 | 4 → 9 |
+| ↳ answer in a user turn (6) | 5 → 5 | 5 → 5 | 5 → 5 |
+| Automatic injection alone (1k, gate 0.6) | 3 (0 of 18 reply answers, 3 of 6 user-turn answers) | | |
+
+Every question that changed improved. Injection alone answers few of these, because they were chosen to be answered in replies and the lane does not open at 1k. That is the honest limit of 0.2's injection: it brings back what you said, and Claude still has to call `recall` for what it concluded.
+
+| LoCoMo (evidence recall) | dev half (801 q) 2k / 8k | **test half, held out (730 q)** 2k / 8k |
+|---|---:|---:|
+| `bm25` | 60.7% / 73.2% | 62.5% / 76.6% |
+| `userfirst-time-hybrid-f3` | 67.8% / 84.3% | 70.7% / 85.2% |
+| `userfirst-time-lane-hybrid-f3` (0.2 default) | 67.8% / 84.3% | 70.7% / 85.2% |
+
+The lane never opens on LoCoMo (both speakers are people, so there are no assistant replies), so the 0.2 default equals 0.1's method there. The test half behaves like the dev half.
+
+| Injection gate (1k, threshold 0.6) | fires with memory | fires without memory | evidence complete when fired | evidence injected overall |
+|---|---:|---:|---:|---:|
+| LongMemEval (development, 470 q) | 71.7% | 10.9% | 75.4% | 54.0% |
+| **LoCoMo test half (held out, 730 q)** | **97.3%** | **6.6%** | 62.1% | 60.4% |
+
+On the held-out half the gate false-fires less than on the dev data it was chosen on (6.6% vs 10%).
+
+| Replay of real sessions through the injection hook (1k, gate 0.6) | prompts | inject | tokens per prompt | tokens per injection |
+|---|---:|---:|---:|---:|
+| Held-out Claude Code sessions | 225 | 40% | 202 | 505 |
+| Development: Claude Code sessions | 180 | 37% | 189 | 507 |
+| Development: WildChat job seeker | 266 | 78% | 712 | 911 |
+| Development: WildChat teacher | 164 | 77% | 611 | 796 |
+
+Latency: the hook takes 0.1 s when nothing is injected and up to 0.3 s when it is; recall on a 665k-token store takes 0.05 s, or 0.13 s at 8k with the reply lane.
+
+## 9. Larger budgets: toward the full history
+
+8k was meant as a stress test of a small context, not a ceiling. Scaling the budget exposed a flaw: recall stopped improving at 8k.
+
+| Later-written real-user questions (24) | 2k | 4k | 8k | 16k | 32k | 64k |
+|---|---:|---:|---:|---:|---:|---:|
+| 0.2 first draft | 5 | 13 | 14 | 14 | 14 | 14 |
+| Budget used (one question) | | | 103% | 82% | 41% | 21% |
+
+**Why.** Real Claude Code replies are long: median 1,104 tokens, 81% over 300, none over 8k. Two rules capped what any budget could bring back:
+
+- Beyond the 3 best rounds and the reply lane, only user turns are packed. Everything the user said in the 270k-token store totals about 13k tokens, so a larger budget sat unused.
+- Every packed turn was cut to its most relevant 300 tokens. At 8k, 9 of the 10 misses had their round picked and the answer cut out by that excerpt.
+
+**Changes**, in the order they were measured:
+
+| Change | Development (70) 8k / 16k / 32k / 64k | Later-written (24) 8k / 16k / 32k / 64k |
+|---|---:|---:|
+| 0.2 first draft | 60 / not measured | 14 / 14 / 14 / 14 |
+| Fill leftover budget with whole replies, user-turn order, cap budget/8 for every turn | 59 / 62 / 66 / 67 | 17 / 17 / 18 / 21 |
+| Same, but pasted user documents keep the 300 cap | 58 / 65 / 66 / 67 | 16 / 16 / 18 / 21 |
+| Larger cap only in the fill step, so 8k is unchanged | **60** / 65 / 66 / 67 | **14** / 16 / 18 / 21 |
+| Fill also restores excerpted user documents | 60 / 65 / 66 / 67 | 14 / 16 / 19 / 21 |
+| **Fill order fuses user turns, reply pieces and whole-round BM25 (final)** | 60 / 65 / 66 / **68** | 14 / **20** / **22** / **24** |
+
+The fill order was chosen by where the answer's round lands, not by the final scores:
+
+| Order of rounds to make whole | Real-user questions (94): answer round in top 20 / MRR | LongMemEval subset (101): top 20 / MRR |
+|---|---:|---:|
+| What the user said (before) | 81% / 0.49 | 95% / 0.75 |
+| Best reply piece + whole-round BM25 | 96% / 0.65 | 100% / 0.82 |
+| **User turns + reply pieces + whole-round BM25 (used)** | 95% / 0.60 | 100% / 0.81 |
+
+The two-signal fusion scores slightly higher, but it ignores what the user said, and in a conversation with no assistant replies (LoCoMo) it falls back to BM25 alone. The three-signal fusion holds up in both kinds of conversation.
+
+**Budget accounting.** The packer estimated formatting per turn, and the rendered text came out 1–3% over the budget. Recall now measures the rendered text and drops the last-picked rounds until it fits.
+
+**On LongMemEval** (106-question subset with every single-session-assistant question), every category is at 100% by 32k except single-session-assistant at 96.4%, which reaches 100% at 64k once the fill step has room. On the full set, without the fill step, multi-session goes 92.6% (8k) → 96.7% (16k) → 100% (32k).
+
+**Caveat.** The 24 later-written questions were inspected to diagnose this, so they are no longer held out for this change. The development questions and LongMemEval show the same trend, and nothing at 8k or below changed.
+
+## 10. Reproducing
 
 | What | Command | Cost |
 |---|---|---|
@@ -223,6 +344,8 @@ Because the questions shaped the code, they are a development aid, not a benchma
 | Paired accuracy table | `pocket-recall eval compare --a … --b …` | free, from the published runs |
 | One method end to end | `pocket-recall eval run --method userfirst-hybrid-f3 --budget 8000 --n 500` | about $27 at list price with Claude Opus 5.5 |
 | Inspect a prompt | `pocket-recall eval inspect --method userfirst-hybrid-f3 <question_id>` | free |
+| Injection gate and evidence | `pocket-recall eval inject --datasets lme locomo-test` | free |
+| Injection frequency on your own history | `pocket-recall eval inject --replay ~/.pocket-recall/memory.db` | free |
 | Offline dry run | `pocket-recall eval run --answer-model echo --judge-model echo` | free |
 
 End-to-end runs need `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` if you use a relay. They resume after interruption and record the endpoint of each answer. Use `pocket-recall eval estimate` to see the token count and cost before you run.

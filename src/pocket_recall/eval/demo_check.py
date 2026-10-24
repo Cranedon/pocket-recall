@@ -17,7 +17,8 @@ from pathlib import Path
 from ..store import MemoryStore
 
 
-def check(directory: Path, budgets: list[int], verbose: bool, only: list[str] | None = None) -> None:
+def check(directory: Path, budgets: list[int], verbose: bool, only: list[str] | None = None,
+          gate: float | None = None) -> None:
     totals = {b: [0, 0] for b in budgets}
     for qfile in sorted(directory.glob("*.questions.json")):
         if only and qfile.name.replace(".questions.json", "") not in only:
@@ -31,7 +32,7 @@ def check(directory: Path, budgets: list[int], verbose: bool, only: list[str] | 
             cells, misses = [], {}
             for b in budgets:
                 r = store.recall(item["q"], b, now=now)
-                text = r.text.lower()
+                text = r.text.lower() if gate is None or (r.relevance or 0) >= gate else ""
                 found = [w for w in item["expect"] if w.lower() in text]
                 totals[b][0] += len(found) == len(item["expect"])
                 totals[b][1] += 1
@@ -51,8 +52,10 @@ def main() -> None:
     p.add_argument("--budgets", type=int, nargs="+", default=[2000, 8000])
     p.add_argument("-v", "--verbose", action="store_true", help="show what is missing")
     p.add_argument("--stores", nargs="+", help="only these stores (names without .db)")
+    p.add_argument("--gate", type=float, help="count a question only if recall's relevance reaches this "
+                                              "(what automatic injection would add)")
     args = p.parse_args()
-    check(Path(args.dir).expanduser(), args.budgets, args.verbose, args.stores)
+    check(Path(args.dir).expanduser(), args.budgets, args.verbose, args.stores, args.gate)
 
 
 if __name__ == "__main__":

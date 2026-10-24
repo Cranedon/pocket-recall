@@ -15,7 +15,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-from .core import estimate_tokens, select, split_rounds
+from .core import REPLY_LANE_SHARE, estimate_tokens, relevance, select, split_rounds
 from .embed import Embedder, Reranker
 from .facts import DEFAULT_MODEL as FACTS_MODEL, Extractor, FactStore
 from .redact import enabled as redact_enabled, redact
@@ -90,6 +90,7 @@ class Recall:
     window: tuple[date, date] | None = None  # the period the question refers to, if any
     time_only: bool = False  # the question named only a time, so that period came strictly first
     window_records: int = 0  # rounds dated inside `window`; 0 means nothing happened then
+    relevance: float | None = None  # gate score (core.relevance); None without embeddings
 
     @property
     def text(self) -> str:
@@ -114,7 +115,8 @@ class MemoryStore:
                  embed_model: str = DEFAULT_EMBED_MODEL, max_turn_tokens: int | None = 300,
                  rerank_model: str | None = DEFAULT_RERANK_MODEL,
                  assistant_keys: bool = os.environ.get("POCKET_RECALL_ASSISTANT_KEYS", "") == "1",
-                 redact_secrets: bool | None = None):
+                 redact_secrets: bool | None = None,
+                 reply_lane: float | None = None):
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, check_same_thread=False)
@@ -126,6 +128,7 @@ class MemoryStore:
         self.max_turn_tokens = max_turn_tokens
         self.assistant_keys = assistant_keys
         self.redact_secrets = redact_enabled() if redact_secrets is None else redact_secrets
+        self.reply_lane = float(os.environ.get("POCKET_RECALL_REPLY_LANE", str(REPLY_LANE_SHARE))) if reply_lane is None else reply_lane
         self._embedder = Embedder(self.path, embed_model) if scorer != "bm25" else None
         self._reranker = Reranker(rerank_model) if rerank_model and scorer != "bm25" else None
         self.facts = FactStore(self.path)  # optional write-time facts, same file
@@ -241,13 +244,16 @@ class MemoryStore:
             sessions[row[1]].messages.append(Message(*row))
         return [s for s in sessions.values() if s.messages]
 
-    def recall(self, query: str, budget_tokens: int = 8000, *, now: datetime | None = None) -> Recall:
+    def recall(self, query: str, budget_tokens: int = 8000, *, now: datetime | None = None,
+               exclude_sessions: Iterable[str] = ()) -> Recall:
         """The history most relevant to `query` that fits in `budget_tokens`.
 
         Time words in the query ("上周", "in March", "two weeks ago") are read relative to `now`
-        and conversations from that period are ranked higher.
+        and conversations from that period are ranked higher. `exclude_sessions` leaves out
+        sessions already in the assistant's context, such as the current one.
         """
-        sessions = self._sessions()
+        skip = set(exclude_sessions)
+        sessions = [s for s in self._sessions() if s.session_id not in skip]
         rounds = split_rounds([s.messages for s in sessions])
         rid_of = {(r.session_idx, r.round_idx): i for i, r in enumerate(rounds)}
         # Re-pasted text yields the same fact again and again ("started businesses in the Caribbean"
@@ -268,22 +274,56 @@ class MemoryStore:
             rounds, query, budget_tokens,
             scorer=self.scorer, embedder=self._embedder, full_rounds=full_rounds,
             round_dates=round_dates,
-            window=window, window_strict=time_only, max_turn_tokens=self.max_turn_tokens, reranker=self._reranker,
-            extra_keys=fact_keys, assistant_keys=self.assistant_keys,
+            window=window, window_strict=time_only, reranker=self._reranker,
+            # longer turns are excerpted. Once every ranked user turn is in, leftover budget brings
+            # replies back under a cap that grows with the budget, so a large budget carries them
+            # whole (a fixed 300 had cut the answer out of 9 of the 10 held-out misses at 8k)
+            max_turn_tokens=self.max_turn_tokens,
+            max_reply_tokens=max(self.max_turn_tokens, budget_tokens // 8) if self.max_turn_tokens else None,
+            extra_keys=fact_keys, assistant_keys=self.assistant_keys, reply_lane=self.reply_lane,
+            fill_replies=True,
         )
-        by_session: dict[int, list[Message]] = {}
-        for rid in sorted(picked, key=lambda r: (rounds[r].session_idx, rounds[r].round_idx)):
-            by_session.setdefault(rounds[rid].session_idx, []).extend(picked[rid])
-        first_pick: dict[int, int] = {}
-        for order, rid in enumerate(picked):  # dict order = the order select() picked rounds in
-            first_pick.setdefault(rounds[rid].session_idx, order)
-        rank_of = {si: i + 1 for i, si in enumerate(sorted(first_pick, key=first_pick.get))}
-        recalled = [
-            RecalledSession(sessions[si].session_id, sessions[si].started_at, msgs, rank_of[si])
-            for si, msgs in by_session.items()
-        ]
-        return Recall(query, recalled, rounds_considered=len(rounds), window=window, time_only=time_only,
-                      window_records=in_window)
+        score = relevance([r.user_text for r in rounds], query, self._embedder) if self._embedder else None
+
+        def build() -> Recall:
+            by_session: dict[int, list[Message]] = {}
+            for rid in sorted(picked, key=lambda r: (rounds[r].session_idx, rounds[r].round_idx)):
+                by_session.setdefault(rounds[rid].session_idx, []).extend(picked[rid])
+            first_pick: dict[int, int] = {}
+            for order, rid in enumerate(picked):  # dict order = the order select() picked rounds in
+                first_pick.setdefault(rounds[rid].session_idx, order)
+            rank_of = {si: i + 1 for i, si in enumerate(sorted(first_pick, key=first_pick.get))}
+            recalled = [
+                RecalledSession(sessions[si].session_id, sessions[si].started_at, msgs, rank_of[si])
+                for si, msgs in by_session.items()
+            ]
+            return Recall(query, recalled, rounds_considered=len(rounds), window=window, time_only=time_only,
+                          window_records=in_window, relevance=score)
+
+        result = build()
+        # select() estimates formatting per turn; the rendered text (session headers, dated
+        # prefixes like "assistant (2026-10-23): ") can come out a few percent longer. Drop the
+        # last-picked, least relevant rounds until the real text fits the budget.
+        while result.tokens_est > budget_tokens and len(picked) > 1:
+            picked.pop(next(reversed(picked)))
+            result = build()
+        return result
+
+    def for_injection(self, query: str, budget_tokens: int = 1000, *, exclude_sessions: Iterable[str] = (),
+                      seen: Iterable[int] = (), now: datetime | None = None) -> dict:
+        """What automatic injection would add for `query`: a recall without the current session,
+        minus messages already injected earlier in it (`seen`, message ids). If the best-matching
+        session brings nothing new, nothing is added: follow-up prompts on the same topic would
+        otherwise re-inject the same history every time."""
+        r = self.recall(query, budget_tokens, now=now, exclude_sessions=exclude_sessions)
+        seen = set(seen)
+        fresh = [RecalledSession(x.session_id, x.started_at, [m for m in x.messages if m.id not in seen], x.rank)
+                 for x in r.sessions]
+        top_is_new = any(x.rank == 1 and x.messages for x in fresh)
+        r.sessions = [x for x in fresh if x.messages] if top_is_new else []
+        return {"text": r.text if r.sessions else "", "relevance": r.relevance, "time_only": r.time_only,
+                "window_records": r.window_records, "ids": [m.id for x in r.sessions for m in x.messages],
+                "tokens_est": r.tokens_est if r.sessions else 0}
 
     def list_sessions(self, *, search: str = "", limit: int = 50, offset: int = 0) -> tuple[int, list[dict]]:
         """(total, page) of sessions, newest first, optionally only those containing `search`."""

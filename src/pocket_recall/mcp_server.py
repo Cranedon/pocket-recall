@@ -5,7 +5,10 @@ Run with `pocket-recall mcp` (stdio). The store lives at $POCKET_RECALL_DB, defa
 
 from __future__ import annotations
 
+import atexit
+import json
 import os
+import socketserver
 import threading
 from datetime import datetime
 
@@ -31,13 +34,16 @@ INSTRUCTIONS += SAVED_AUTOMATICALLY if AUTOSAVE else SAVE_MANUALLY
 server = MCPServer("pocket-recall", instructions=INSTRUCTIONS, version=__version__,
                    website_url="https://github.com/Cranedon/pocket-recall")
 _store: MemoryStore | None = None
+# MCP tool calls and injection requests arrive on different threads; one SQLite connection, one lock.
+_lock = threading.RLock()
 
 
 def store() -> MemoryStore:
     global _store
-    if _store is None:
-        _store = MemoryStore(os.environ.get("POCKET_RECALL_DB", "~/.pocket-recall/memory.db"))
-    return _store
+    with _lock:
+        if _store is None:
+            _store = MemoryStore(os.environ.get("POCKET_RECALL_DB", "~/.pocket-recall/memory.db"))
+        return _store
 
 
 @server.tool()
@@ -47,7 +53,8 @@ def recall(query: str, budget_tokens: int = 8000) -> str:
     Returns verbatim excerpts, oldest first, each under its session date, fitting in
     `budget_tokens`. Use the current date to resolve relative times ("last week").
     """
-    result = store().recall(query, budget_tokens)
+    with _lock:
+        result = store().recall(query, budget_tokens)
     if not result.sessions:
         return "No stored conversations yet."
     header = f"Current date: {datetime.now().astimezone():%Y-%m-%d %H:%M}. "
@@ -78,27 +85,62 @@ def save_conversation(messages: list[dict[str, str]], session_id: str | None = N
         times = [normalize_time(m.get("created_at") or started_at) for m in clean]
     except ValueError as e:
         return f"Not saved: could not read a date ({e}). Use a form like 2025-03-14 or 2025-03-14T09:30."
-    if session_id:
-        for m, at in zip(clean, times):
-            store().add_message(m["role"], m["content"], session_id=session_id, created_at=at)
-    else:
-        session_id = store().add_session(
-            [{**m, "created_at": at} for m, at in zip(clean, times)], started_at=times[0]
-        )
+    with _lock:
+        if session_id:
+            for m, at in zip(clean, times):
+                store().add_message(m["role"], m["content"], session_id=session_id, created_at=at)
+        else:
+            session_id = store().add_session(
+                [{**m, "created_at": at} for m, at in zip(clean, times)], started_at=times[0]
+            )
     return f"Saved {len(clean)} messages to session {session_id}."
 
 
 @server.tool()
 def forget_session(session_id: str) -> str:
     """Permanently delete one stored session and all its messages."""
-    return f"Deleted session {session_id}." if store().forget_session(session_id) else f"No session {session_id}."
+    with _lock:
+        gone = store().forget_session(session_id)
+    return f"Deleted session {session_id}." if gone else f"No session {session_id}."
 
 
 @server.tool()
 def memory_stats() -> str:
     """How much is stored and where."""
-    s = store().stats()
+    with _lock:
+        s = store().stats()
     return f"{s['sessions']} sessions, {s['messages']} messages (~{s['tokens_est']:,} tokens) in {s['path']}"
+
+
+class _InjectHandler(socketserver.StreamRequestHandler):
+    """One JSON line in ({"query", "budget", "exclude", "seen"}), one JSON line out (see inject.py)."""
+
+    def handle(self) -> None:
+        try:
+            req = json.loads(self.rfile.readline())
+            with _lock:
+                out = store().for_injection(str(req["query"]), int(req.get("budget", 1000)),
+                                            exclude_sessions=req.get("exclude") or (), seen=req.get("seen") or ())
+        except Exception as e:  # report, never crash the server
+            out = {"error": f"{type(e).__name__}: {e}"}
+        self.wfile.write(json.dumps(out, ensure_ascii=False).encode() + b"\n")
+
+
+def _serve_injection() -> None:
+    """Answer the UserPromptSubmit hook over a socket only this user can open."""
+    from .inject import RUN_DIR
+
+    try:
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        RUN_DIR.chmod(0o700)
+        path = RUN_DIR / f"mcp-{os.getpid()}.sock"
+        path.unlink(missing_ok=True)
+        server = socketserver.UnixStreamServer(str(path), _InjectHandler)
+        path.chmod(0o600)
+        atexit.register(path.unlink, missing_ok=True)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    except Exception:
+        pass  # no injection; the recall tool still works
 
 
 def _warm_up() -> None:
@@ -114,4 +156,6 @@ def _warm_up() -> None:
 
 def main() -> None:
     threading.Thread(target=_warm_up, daemon=True).start()
+    if os.environ.get("POCKET_RECALL_INJECT", "1") != "0" and hasattr(socketserver, "UnixStreamServer"):
+        _serve_injection()
     server.run("stdio")

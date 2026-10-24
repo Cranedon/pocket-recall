@@ -8,6 +8,7 @@ import sys
 COMMANDS = {
     "mcp": ("pocket_recall.mcp_server", "run the MCP server over stdio"),
     "hook": ("pocket_recall.hook", "Claude Code Stop hook: save the session's new turns"),
+    "inject": ("pocket_recall.inject", "Claude Code UserPromptSubmit hook: add relevant memory to the prompt"),
     "import": ("pocket_recall.importers", "import Claude Code sessions or a claude.ai export"),
     "redact": ("pocket_recall.redact", "mask secrets in a store written before redaction was on"),
     "web": ("pocket_recall.web", "local web page to browse stores and try recall"),

@@ -1,6 +1,6 @@
 [project]
 name = "pocket-recall"
-version = "0.1.2"
+version = "0.2.0"
 description = "Lossless, local long-term memory for personal AI assistants: SQLite + hybrid retrieval, served over MCP"
 readme = "README.md"
 license = "MIT"

@@ -1,7 +1,7 @@
 {
   "name": "pocket-recall",
   "displayName": "Pocket Recall",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Lossless, local long-term memory for Claude Code: every session is saved verbatim to one SQLite file on your machine and the relevant past is recalled within a token budget. No API key, no cloud.",
   "author": {
     "name": "cranedone",

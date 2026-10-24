@@ -6,7 +6,7 @@ from datetime import date, datetime
 
 from tqdm import tqdm
 
-from ..core import ASSISTANT_KEY_TOKENS, chunk_text, select
+from ..core import ASSISTANT_KEY_TOKENS, REPLY_LANE_SHARE, chunk_text, select
 from ..embed import MODEL, Embedder
 from ..facts import FactStore
 from ..timeparse import is_time_only, time_reference
@@ -41,14 +41,17 @@ def parse_date(s: str) -> date:
 
 class UserFirstRetrieval:
     def __init__(self, budget_tokens: int = 8000, scorer: str = "hybrid", full_rounds: int = 3, facts: bool = False,
-                 time: bool = False, assistant: bool = False):
+                 time: bool = False, assistant: bool = False, lane: bool = False, fill: bool = False):
         self.budget = budget_tokens
         self.scorer = scorer
         self.full_rounds = full_rounds
         self.facts = facts
         self.time = time
         self.assistant = assistant
-        flags = ("facts-" if facts else "") + ("time-" if time else "") + ("asst-" if assistant else "")
+        self.lane = lane
+        self.fill = fill
+        flags = (("facts-" if facts else "") + ("time-" if time else "") + ("asst-" if assistant else "")
+                 + ("lane-" if lane else "") + ("fill-" if fill else ""))
         self.name = f"userfirst-{flags}{scorer}-f{full_rounds}-{budget_tokens}"
 
     def fact_keys(self, inst: Instance, rounds) -> list[tuple[str, int]]:
@@ -76,7 +79,7 @@ class UserFirstRetrieval:
             rounds = _split_rounds(inst.sessions)
             texts.update(r.user_text for r in rounds)
             texts.update(text for text, _ in self.fact_keys(inst, rounds))
-            if self.assistant:
+            if self.assistant or self.lane:
                 texts.update(p for r in rounds if r.assistant_text for p in chunk_text(r.assistant_text, ASSISTANT_KEY_TOKENS))
         ordered = sorted(texts, key=len)
         # Sorted by length so each batch pads to similar lengths; committed in chunks so a stop loses little.
@@ -98,6 +101,8 @@ class UserFirstRetrieval:
             window=ref[0] if ref else None,
             window_strict=bool(ref) and is_time_only(ref[1]),
             assistant_keys=self.assistant,
+            reply_lane=REPLY_LANE_SHARE if self.lane else 0.0,
+            fill_replies=self.fill,
         )
         by_session: dict[int, list] = {}
         for rid in sorted(picked, key=lambda r: (rounds[r].session_idx, rounds[r].round_idx)):

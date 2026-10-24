@@ -196,9 +196,24 @@ def test_empty_time_window_is_reported(tmp_path):
 
 def test_full_rounds_shrink_with_the_budget(tmp_path):
     s = MemoryStore(tmp_path / "m.db", scorer="bm25")
-    s.add_session(chat("My bike is a red Bianchi."))
+    for day in range(1, 61):  # ~4k tokens of user turns, more than a 2k budget holds
+        s.add_session([{"role": "user", "content": f"Day {day}: my bike is a red Bianchi and I rode it to work again today."},
+                       {"role": "assistant", "content": "Nice ride! " * 40}], started_at=f"2026-03-{day % 28 + 1:02d}")
     assert any(m.role == "assistant" for x in s.recall("What bike do I have?", 8000).sessions for m in x.messages)
     assert all(m.role == "user" for x in s.recall("What bike do I have?", 2000).sessions for m in x.messages)
+    s.close()
+
+
+def test_leftover_budget_brings_whole_replies(tmp_path):
+    s = MemoryStore(tmp_path / "m.db", scorer="bm25")
+    long_reply = "Here is the plan. " * 400 + "The staging port is 5433."  # ~2.8k tokens
+    s.add_session([{"role": "user", "content": "ok, set up staging"}, {"role": "assistant", "content": long_reply}])
+    s.add_session(chat("My bike is a red Bianchi."))
+    # everything the user said fits, so the rest of the budget carries replies, whole when they fit
+    assert "My bike is a red Bianchi" in s.recall("What bike do I have?", 2000).text
+    assert "Sure! Here are some detailed thoughts" in s.recall("What bike do I have?", 2000).text
+    assert "5433" in s.recall("Which port does staging use?", 32000).text
+    assert long_reply.strip() in s.recall("Which port does staging use?", 32000).text
     s.close()
 
 
@@ -270,3 +285,26 @@ def test_chinese_recall_stays_within_budget(tmp_path):
     cjk = sum("一" <= c <= "鿿" for c in r.text)
     assert r.sessions and r.tokens_est <= 1000 and cjk * CJK_TOKENS_PER_CHAR <= 1000
     s.close()
+
+
+def test_reply_lane_finds_answers_written_by_the_assistant(tmp_path):
+    filler = "We talked about many unrelated things that day, like the weather and the news. " * 6
+
+    def build(lane):
+        s = MemoryStore(tmp_path / f"lane-{lane}.db", scorer="bm25", reply_lane=lane, full_rounds=0)
+        for day in range(1, 25):
+            s.add_session([{"role": "user", "content": f"Let's keep going on the report, part {day}. {filler}"},
+                           {"role": "assistant", "content": f"Done with part {day}. {filler}"}],
+                          started_at=f"2026-02-{day:02d}")
+        s.add_session([{"role": "user", "content": "ok, do it"},
+                       {"role": "assistant", "content": filler + " The relay injected a hidden system prompt, "
+                        "so token usage jumped between 444 and 7,619 tokens. " + filler}],
+                      started_at="2026-03-01")
+        return s
+
+    question = "What was wrong with the relay's token usage?"
+    off, on = build(0.0), build(0.15)
+    assert "7,619" not in off.recall(question, budget_tokens=4000).text
+    assert "7,619" in on.recall(question, budget_tokens=4000).text
+    assert "7,619" not in on.recall(question, budget_tokens=2000).text  # no lane below 4k tokens
+    off.close(), on.close()

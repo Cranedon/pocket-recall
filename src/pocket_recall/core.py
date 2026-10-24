@@ -16,6 +16,7 @@ objects, so callers keep whatever else they attach to them.
 from __future__ import annotations
 
 import copy
+import functools
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -34,6 +35,15 @@ TURN_PREFIX_TOKENS = 3  # "\n\nuser: "
 RRF_K = 60
 ASSISTANT_KEY_TOKENS = 120  # size of the assistant-reply pieces used as retrieval keys
 ASSISTANT_EXCERPT_TOKENS = 200  # how much of a reply comes along when one of its pieces matched
+# Reply lane: a small share of the budget for the best-matching pieces of assistant replies, kept
+# apart from the user-first ranking so a wrong pick costs at most this share.
+# On the real-user dev questions: off 43/57 (2k/8k), 10% 48/59, 15% 51/60, 25% 51/60. At small
+# budgets it crowds out user turns: on LongMemEval at 2k it cost 6 of ~50 questions (none at 8k),
+# and at 1k with the injection gate the real-user score fell from 28 to 25. So it starts at 4k.
+REPLY_LANE_SHARE = 0.15
+REPLY_LANE_MAX = 3
+REPLY_LANE_MIN_BUDGET = 4000
+LANE_ADAPTIVE = True
 RERANK_TOP = 30  # candidates the cross-encoder re-scores; the rest keep their order
 RERANK_CHARS = 1500  # cross-encoders read ~512 tokens; long pastes are cut for scoring only
 # Character-pair BM25 is noisy for Chinese: pairs like "我的" match nearly every personal
@@ -110,6 +120,7 @@ _WORD = re.compile(r"\w+", re.UNICODE)
 _CJK_RUN = re.compile(r"[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]+")
 
 
+@functools.lru_cache(maxsize=262144)
 def _cjk_bigrams(text: str) -> str:
     """Chinese/Japanese/Korean have no spaces, so FTS5 would index a whole clause as one word.
     Index overlapping character pairs instead ("我的猫" -> "我的 的猫"); other text is unchanged."""
@@ -159,6 +170,31 @@ def rrf(*rankings: list[int], weights: Sequence[float] | None = None) -> list[in
     return sorted(score, key=lambda i: -score[i])
 
 
+# Relevance gate for automatic injection: best cosine between the query and a key, plus a bonus
+# for how many of the query's content words the best keys share. Separating "memory has it" from
+# "it does not" (the question against another user's history), AUC 0.89 on LongMemEval and 0.99
+# on LoCoMo dev, against 0.84 / 0.98 for the cosine alone.
+GATE_COVER_WEIGHT = 0.3
+_GATE_STOP = set("""the a an and or of to in on at for is are was were did do does i my me you we
+what how when which who with about from that this have has had any can could would should will it
+its be been there their they them your our""".split())
+
+
+def _content_words(text: str) -> set[str]:
+    return {w.lower() for w in _WORD.findall(_cjk_bigrams(text)) if len(w) > 1} - _GATE_STOP - _ZH_STOP_PAIRS
+
+
+def relevance(texts: list[str], query: str, embedder: EmbedderLike) -> float:
+    """How likely it is that `texts` hold something about `query`, roughly 0-1.3."""
+    if not texts:
+        return 0.0
+    scores = embedder.passages(texts) @ embedder.query(query)
+    words = _content_words(query)
+    best = np.argsort(-scores)[:5]
+    cover = max(len(words & _content_words(texts[i])) / max(len(words), 1) for i in best)
+    return float(scores.max()) + GATE_COVER_WEIGHT * cover
+
+
 def rank(texts: list[str], query: str, scorer: str = "hybrid", embedder: EmbedderLike | None = None,
          reranker: RerankerLike | None = None) -> list[int]:
     """Every index exactly once, best first. BM25 skips texts with no word overlap; those trail.
@@ -187,6 +223,11 @@ EXCERPT_CHUNK_TOKENS = 60
 
 def chunk_text(text: str, chunk_tokens: int) -> list[str]:
     """Consecutive sentences grouped into pieces of about `chunk_tokens`."""
+    return list(_chunks(text, chunk_tokens))
+
+
+@functools.lru_cache(maxsize=65536)  # a long-running server re-chunks the same replies on every recall
+def _chunks(text: str, chunk_tokens: int) -> tuple[str, ...]:
     chunks: list[str] = []
     for sentence in (s for s in _SENTENCE_END.split(text) if s and s.strip()):
         if chunks and estimate_tokens(chunks[-1]) + estimate_tokens(sentence) <= chunk_tokens:
@@ -196,7 +237,7 @@ def chunk_text(text: str, chunk_tokens: int) -> list[str]:
             # an overlong "sentence" (a pasted log, a run-on line) is cut to about two chunks
             limit = int(2 * chunk_tokens * len(sentence) / estimate_tokens(sentence))
             chunks.append(sentence[: max(limit, 1)])
-    return chunks
+    return tuple(chunks)
 
 
 def excerpt(text: str, query: str, max_tokens: int, *, scorer: str = "hybrid",
@@ -242,6 +283,9 @@ def select(
     max_turn_tokens: int | None = None,
     reranker: RerankerLike | None = None,
     assistant_keys: bool = False,
+    reply_lane: float = 0.0,
+    fill_replies: bool = False,
+    max_reply_tokens: int | None = None,
 ) -> dict[int, list]:
     """Pick rounds for `query` within `budget` tokens: round index -> turns to include.
 
@@ -252,19 +296,26 @@ def select(
     only a time ("what did I do last week") where the content ranking is noise.
     `max_turn_tokens` replaces longer turns with their most relevant excerpt (copies; the
     originals are untouched), so one pasted document cannot crowd out everything else.
+    `max_reply_tokens` caps turns in the `fill_replies` step only (default: `max_turn_tokens`):
+    while user turns compete for the budget, replies stay excerpted like everything else; once
+    every ranked user turn is in, leftover budget can carry them whole.
     `assistant_keys` also ranks pieces of the assistant's replies: a round found that way comes
     with an excerpt of the reply. In chat logs the answer is often the assistant's conclusion,
     which user-first packing would otherwise only see through the few whole rounds.
+    `reply_lane` (a share of the budget, e.g. 0.15) instead ranks reply pieces on their own and
+    adds up to REPLY_LANE_MAX of the best ones, each with its round's user turns, within that share.
+    `fill_replies` spends what is left after every ranked user turn on making the picked rounds
+    whole, best first: their replies, and pasted documents that were excerpted. A budget larger
+    than everything the user said so moves toward the full, verbatim history instead of sitting
+    unused.
     """
 
-    def shorten(turns: list) -> list:
-        if not max_turn_tokens:
-            return turns
+    def shorten(turns: list, cap: int | None = max_turn_tokens) -> list:
         out = []
         for t in turns:
-            if estimate_tokens(t.content) > max_turn_tokens:
+            if cap and estimate_tokens(t.content) > cap:
                 t = copy.copy(t)
-                t.content = excerpt(t.content, query, max_turn_tokens, scorer=scorer, embedder=embedder)
+                t.content = excerpt(t.content, query, cap, scorer=scorer, embedder=embedder)
             out.append(t)
         return out
 
@@ -333,6 +384,37 @@ def select(
             break
         whole += take(rid, shorten(rounds[rid].turns))
 
+    pieces = ([(rid, piece) for rid, r in enumerate(rounds) if r.assistant_text
+               for piece in chunk_text(r.assistant_text, ASSISTANT_KEY_TOKENS)]
+              if reply_lane and budget >= REPLY_LANE_MIN_BUDGET else [])
+    if pieces and embedder is not None and LANE_ADAPTIVE:
+        # Only when a reply matches the question better than anything the user said: then the
+        # answer is likely the assistant's own conclusion. Otherwise the lane would only take
+        # budget from user turns (on LongMemEval at 2k it cost 6 of ~50 questions).
+        q = embedder.query(query)
+        best_reply = float((embedder.passages([p for _, p in pieces]) @ q).max())
+        best_user = float((embedder.passages([r.user_text for r in rounds]) @ q).max())
+        if best_reply <= best_user:
+            pieces = []
+    if pieces:
+        lane_end = used + int(budget * reply_lane)
+        lane_rounds = 0
+        for k in rank([p for _, p in pieces], query, scorer, embedder):
+            rid, piece = pieces[k]
+            if lane_rounds >= REPLY_LANE_MAX or used >= lane_end:
+                break
+            if any(t.role == "assistant" for t in picked.get(rid, [])):
+                continue  # already has its whole reply or a piece of it
+            reply = copy.copy(next(t for t in rounds[rid].turns if t.role == "assistant"))
+            reply.content = piece if piece == rounds[rid].assistant_text.strip() else f"… {piece} …"
+            if hasattr(reply, "has_answer") and reply.content != rounds[rid].assistant_text:
+                reply.has_answer = False  # benchmark bookkeeping: a piece of a reply is not the whole evidence
+            turns = ([] if rid in picked else shorten(rounds[rid].user_turns)) + [reply]
+            header = 0 if rounds[rid].session_idx in sessions_touched else SESSION_HEADER_TOKENS
+            cost = header + sum(estimate_tokens(t.content) + TURN_PREFIX_TOKENS for t in turns)
+            if used + cost <= lane_end and take(rid, turns):
+                lane_rounds += 1
+
     # Everything else: user turns, ranked on what the user said (or keys drawn from it); a round
     # matched through a piece of its reply also gets that reply's relevant excerpt.
     for key in ranked:
@@ -345,4 +427,43 @@ def select(
                 take(rid, reply_excerpt(rid))
         elif rid not in picked:
             take(rid, shorten(rounds[rid].user_turns))
+
+    if fill_replies and used < budget:
+        # Which rounds to make whole first: what the user said is a weak guide here, because the
+        # answer is often in the reply of a round whose user turn was "ok, do it". Fuse three
+        # signals: the user-turn ranking, the best piece of each reply, and BM25 over the whole
+        # round. On 94 real-user questions the answer's round reached the top 20 for 81% with user
+        # turns alone and 95% fused; on 101 LongMemEval questions, 95% and 100%.
+        n = len(rounds)
+        rest = lambda order: order + [i for i in range(n) if i not in set(order)]
+        user_order = rest(list(dict.fromkeys(owners[k] for k in ranked)))
+        reply_pieces = [(rid, piece) for rid, r in enumerate(rounds) if r.assistant_text
+                        for piece in chunk_text(r.assistant_text, ASSISTANT_KEY_TOKENS)]
+        piece_order = rest(list(dict.fromkeys(
+            reply_pieces[k][0] for k in rank([p for _, p in reply_pieces], query, scorer, embedder)))) if reply_pieces else []
+        round_bm25 = rest(bm25_rank([r.text for r in rounds], query))
+        orders = [user_order, round_bm25] + ([piece_order] if piece_order else [])
+        weights = [1.0, 0.3 if has_cjk(query) else 1.0] + ([1.0] if piece_order else [])
+        cap = max_reply_tokens or max_turn_tokens
+        for rid in rrf(*orders, weights=weights):
+            room = budget - used
+            if room < TURN_PREFIX_TOKENS + 10:
+                break
+            have = picked.get(rid, [])
+            # cheap bound before excerpting anything: the round can only cost this much
+            bound = sum(min(estimate_tokens(t.content), cap or 10**9) + TURN_PREFIX_TOKENS for t in rounds[rid].turns)
+            bound -= sum(estimate_tokens(t.content) + TURN_PREFIX_TOKENS for t in have)
+            if bound > room + 50:
+                continue
+            whole = shorten(list(rounds[rid].turns), cap)
+            if len(whole) == len(have) and all(a is b or a.content == b.content for a, b in zip(whole, have)):
+                continue
+            if not have:
+                take(rid, whole)
+                continue
+            cost = sum(estimate_tokens(t.content) + TURN_PREFIX_TOKENS for t in whole)
+            cost -= sum(estimate_tokens(t.content) + TURN_PREFIX_TOKENS for t in have)
+            if used + cost <= budget:
+                picked[rid] = whole
+                used += cost
     return picked

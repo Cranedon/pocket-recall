@@ -15,10 +15,11 @@
 /plugin install pocket-recall --marketplace Cranedon/pocket-recall
 ```
 
-The plugin bundles three things:
+The plugin bundles four things:
 
 - an MCP server with a `recall` tool;
 - a Stop hook that saves each turn of every session (your prompts and Claude's written replies, not tool output);
+- a prompt hook that adds relevant memory to a prompt on its own, when there is some (see [Automatic injection](#automatic-injection));
 - a skill that tells Claude when to look things up.
 
 It needs [uv](https://docs.astral.sh/uv/). On first start it sets up its own environment (about 170 MB) and downloads the embedding model (about 240 MB); after that it runs offline. Memory lives in `~/.pocket-recall/memory.db` and survives plugin updates and uninstalls.
@@ -86,6 +87,19 @@ These design choices come from measurements, not guesses (details in the [evalua
 - **Hybrid ranking.** BM25 catches names and numbers, embeddings catch paraphrases, and rank fusion keeps the best of both: 91.3% → 96.4% on LongMemEval, and 73.3% → 84.1% on the held-out LoCoMo.
 - **Time awareness.** "What did I do last week" becomes a date range that adds weight to sessions inside it, without hiding relevant ones outside it. A question that only asks about time ("what did I do yesterday?") orders strictly by that period.
 - **Excerpts, not truncation.** A pasted 3,000-token resume would eat a small budget. Long turns keep their opening and the passages closest to the question, and the full text stays in the database.
+- **A larger budget gets closer to the whole history.** Small budgets are a trade-off: what you said comes first, and long turns are excerpted. Once every relevant thing you said fits, the rest of the budget makes rounds whole, the replies Claude wrote and documents you pasted. The order fuses three signals: the ranking of what you said, the best-matching piece of each reply, and BM25 over the whole round. With a budget as large as the store, recall returns everything verbatim.
+- **A reply lane for what the assistant concluded.** In coding sessions the answer is often in Claude's reply ("the relay injects a hidden system prompt"), after a user turn like "ok, do it". From 4k tokens on, when a reply matches the question better than anything you said, 15% of the budget goes to the best-matching pieces of replies, each with the user turn that led to it. It is kept apart from the user-first ranking, so a wrong pick costs at most that share.
+
+### Automatic injection
+
+Claude only benefits from memory if it calls `recall`, and it does not always know when to. Like claude-mem, pocket-recall can add memory to a prompt on its own, but without an LLM summarising each step:
+
+1. Before Claude sees a prompt, the hook asks the already-running MCP server over a local socket (about 0.1–0.3 s).
+2. The server recalls up to 1,000 tokens for the prompt, leaving out the current session, which is already in Claude's context.
+3. A **relevance gate** decides whether to add it: the best cosine match plus a bonus for shared content words. Questions that only name a period ("what did I do last week") pass when that period has records.
+4. A message is never injected twice in one session. If the best match brings nothing new, nothing is added, so follow-ups on one topic do not repeat the same history.
+
+Short prompts ("ok", "继续") and slash commands are skipped, and any problem means no injection rather than a blocked prompt. Turn it off with `POCKET_RECALL_INJECT=0`.
 
 ## Results
 
@@ -105,6 +119,8 @@ pocket-recall eval bench            # writes the tables in docs/results/recall.m
 | pocket-recall, BM25 only | 56.4% | 91.3% | 59.8% | 73.3% |
 | pocket-recall, hybrid | 57.9% | 96.4% | 68.6% | 84.1% |
 | pocket-recall, hybrid + time (default) | 57.4% | **96.8%** | 69.2% | **84.7%** |
+
+0.2 tuned only the injection gate on half of LoCoMo, and its recall changes never open on LoCoMo, so these recall numbers are unchanged and still untuned. Per-half tables are in [docs/results/recall-locomo-halves.md](docs/results/recall-locomo-halves.md).
 
 LongMemEval histories run 115k–177k tokens per question, so 8k tokens is about 5% of the history. LoCoMo conversations are 18k–37k tokens, and every utterance there comes from one of two people, so user-first packing has nothing to prefer. On the held-out set, the hybrid ranking carries over (+8 to +10 points over raw BM25), but user-first packing alone does not (−1.5 points): with no assistant replies to leave out, it has nothing to gain. Multi-hop questions stay hard at 57% (8k).
 
@@ -140,9 +156,44 @@ Published LongMemEval scores mostly use GPT-4o as reader, so these numbers are n
 | Assistant replies as extra retrieval keys | No gain on LongMemEval or real-user questions; 300× slower | Optional, off |
 | bge-m3 instead of MiniLM | Fixed 4 of MiniLM's 15 LongMemEval misses; real-user questions even (48 and 59 of 70 at 2k/8k, vs 45 and 60); 25× slower to embed, 2.1 GB model | Optional (`POCKET_RECALL_EMBED_MODEL=BAAI/bge-m3`) |
 
+### 0.2: reply lane and automatic injection
+
+All of 0.2 was tuned on development data only: LongMemEval, the LoCoMo dev half, and the real-user questions that shaped 0.1. Before any tuning, 24 new questions were written from recent Claude Code sessions that none of the earlier questions used, 18 of them answered only in an assistant reply. They were run once, at the end.
+
+| Held-out real-user questions (24) | 2k | 4k | 8k |
+|---|---:|---:|---:|
+| 0.1.2 | 5 | 7 | 9 |
+| **0.2** | 5 | **13** | **14** |
+| ↳ answer in an assistant reply (18) | 0 → 0 | 2 → 8 | 4 → 9 |
+| ↳ answer in a user turn (6) | 5 → 5 | 5 → 5 | 5 → 5 |
+
+Every question that changed got better. The lane does not cost LoCoMo anything (both speakers there are people, so it never opens). On LongMemEval it cost 1 of about 50 questions at 4k and none at 8k; below 4k it cost more, which is why it starts at 4k.
+
+**Automatic injection** (1,000 tokens, gate 0.6). "Without memory" asks each question against a history that does not contain its answer:
+
+| | fires with memory | fires without memory | evidence complete when it fires |
+|---|---:|---:|---:|
+| LongMemEval (development, 470 q) | 71.7% | 10.9% | 75.4% |
+| LoCoMo test half (held out, 730 q) | **97.3%** | **6.6%** | 62.1% |
+
+Replaying real Claude Code sessions through the hook, 40% of prompts got an injection, at about 500 tokens each (200 per prompt on average). The hook adds 0.1–0.3 s to a prompt.
+
+### Larger budgets
+
+How many real-user questions recall answers completely as the budget grows (the expected words all come back):
+
+| Budget | 2k | 4k | 8k | 16k | 32k | 64k |
+|---|---:|---:|---:|---:|---:|---:|
+| Development questions (70) | 43 | 57 | 60 | 65 | 66 | **68** |
+| Later-written questions (24), before | 5 | 13 | 14 | 14 | 14 | 14 |
+| Later-written questions (24), now | 5 | 13 | 14 | **20** | **22** | **24** |
+
+"Before" is 0.2's first draft, which stopped improving at 8k. Those 24 questions were inspected to diagnose this, so for this change they are no longer held out. The development questions and LongMemEval, where every category reaches 100% at 64k, show the same trend. Results at 8k and below did not change.
+
 ### Known limits
 
-- **Decisions written by the assistant** ("we switched the relay because…") are recalled less reliably than your own words, because only the top rounds keep their replies.
+- **Decisions written by the assistant** are recalled better since 0.2, but at 8k still only half of the held-out ones come back, and injection's 1,000 tokens almost never carry them. Claude still has to call `recall` for those, ideally with a larger budget.
+- **Between 16k and 32k, user turns still come first.** On LongMemEval, 2 single-session-assistant questions only come back at 64k, because the budget fills with user turns before replies get their turn.
 - **Developed on LongMemEval-S.** Weights such as the time boost were picked on it, which is why LoCoMo is reported as the held-out check.
 - The real-user questions behind several numbers above were written by reading the conversations. They guided development and are not a benchmark.
 
@@ -161,13 +212,18 @@ Published LongMemEval scores mostly use GPT-4o as reader, so these numbers are n
 | `POCKET_RECALL_MODEL_DIR` | `~/.pocket-recall/models` | Model cache |
 | `POCKET_RECALL_REDACT` | `1` | `0` stores text without masking secrets |
 | `POCKET_RECALL_RERANK_MODEL` | unset | Optional cross-encoder, e.g. `BAAI/bge-reranker-v2-m3-int8` |
-| `POCKET_RECALL_ASSISTANT_KEYS` | unset | `1` also indexes chunks of assistant replies |
+| `POCKET_RECALL_REPLY_LANE` | `0.15` | Share of the budget (from 4k tokens on) for pieces of assistant replies; `0` turns it off |
+| `POCKET_RECALL_INJECT` | `1` | `0` turns automatic injection off |
+| `POCKET_RECALL_INJECT_BUDGET` | `1000` | Tokens injected at most per prompt |
+| `POCKET_RECALL_INJECT_THRESHOLD` | `0.6` | Relevance needed to inject; higher injects less often |
+| `POCKET_RECALL_ASSISTANT_KEYS` | unset | `1` mixes chunks of assistant replies into the main ranking (0.1 experiment, superseded by the reply lane) |
 
 ## Command line
 
 ```
 pocket-recall mcp       run the MCP server over stdio
 pocket-recall hook      Claude Code Stop hook: save the session's new turns
+pocket-recall inject    Claude Code prompt hook: add relevant memory to the prompt
 pocket-recall import    import Claude Code sessions or a claude.ai export
 pocket-recall redact    mask secrets in a store written before redaction was on
 pocket-recall web       local web page to browse stores and try recall
@@ -190,7 +246,7 @@ uv run pytest
 | `src/pocket_recall/core.py` | Ranking and budget-aware packing, shared by the store and the benchmarks |
 | `src/pocket_recall/store.py` | `MemoryStore`: SQLite schema, write path, `recall` |
 | `src/pocket_recall/timeparse.py` | Chinese and English time expressions to date ranges |
-| `src/pocket_recall/mcp_server.py`, `hook.py`, `importers.py` | Integrations |
+| `src/pocket_recall/mcp_server.py`, `hook.py`, `inject.py`, `importers.py` | Integrations |
 | `src/pocket_recall/eval/` | LongMemEval and LoCoMo harness, paired comparison |
 | `.claude-plugin/`, `.mcp.json`, `hooks/`, `skills/` | The Claude Code plugin |
 
