@@ -75,6 +75,7 @@ class AnthropicLLM:
         self.fallbacks = fallbacks
         self.request = request
         self.client = anthropic.Anthropic(max_retries=6)
+        self._bad_request = anthropic.BadRequestError
         self.endpoint = self.client.base_url.host
 
     def complete(self, prompt: str, *, max_tokens: int) -> Completion:
@@ -83,8 +84,14 @@ class AnthropicLLM:
         if self.effort:
             kwargs["output_config"] = {"effort": self.effort}
         if self.fallbacks:
-            kwargs.update(betas=[FALLBACK_BETA], fallbacks="default")
-            response = self.client.beta.messages.create(**kwargs)
+            try:
+                response = self.client.beta.messages.create(**kwargs, betas=[FALLBACK_BETA], fallbacks="default")
+            except self._bad_request as e:
+                if "fallbacks" not in str(e):
+                    raise
+                # some endpoints (relays, older gateways) reject the parameter; drop it from now on
+                self.fallbacks = False
+                response = self.client.messages.create(**kwargs)
         else:
             response = self.client.messages.create(**kwargs)
         text = "".join(b.text for b in response.content if b.type == "text")
