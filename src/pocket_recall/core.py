@@ -44,6 +44,8 @@ ASSISTANT_EXCERPT_TOKENS = 200  # how much of a reply comes along when one of it
 REPLY_LANE_SHARE = 0.15
 REPLY_LANE_MAX = 3
 REPLY_LANE_MIN_BUDGET = 4000
+LANE_EXTEND = True  # the lane may add its piece to a round whose reply came in excerpted without it
+REPLY_FUSE_WEIGHT = 1.0  # with the gate open, reply pieces compete with user turns at this RRF weight; 0 = off
 LANE_ADAPTIVE = True
 RERANK_TOP = 30  # candidates the cross-encoder re-scores; the rest keep their order
 RERANK_CHARS = 1500  # cross-encoders read ~512 tokens; long pastes are cut for scoring only
@@ -421,6 +423,10 @@ def structured_units(text: str) -> tuple[Unit, ...]:
     return tuple(units)
 
 
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
 STRUCTURED_EXCERPT = True
 
 
@@ -527,7 +533,8 @@ def select(
     with an excerpt of the reply. In chat logs the answer is often the assistant's conclusion,
     which user-first packing would otherwise only see through the few whole rounds.
     `reply_lane` (a share of the budget, e.g. 0.15) instead ranks reply pieces on their own and
-    adds up to REPLY_LANE_MAX of the best ones, each with its round's user turns, within that share.
+    adds up to REPLY_LANE_MAX of the best ones, each with its round's user turns, within that share;
+    the rest then compete with user turns for the remaining budget (REPLY_FUSE_WEIGHT).
     `fill_replies` spends what is left after every ranked user turn on making the picked rounds
     whole, best first: their replies, and pasted documents that were excerpted. A budget larger
     than everything the user said so moves toward the full, verbatim history instead of sitting
@@ -633,28 +640,59 @@ def select(
         best_user = float((embedder.passages([r.user_text for r in rounds]) @ q).max())
         if best_reply <= best_user:
             pieces = []
+
+    def add_piece(rid: int, piece: str, limit: int) -> bool:
+        """Add one reply piece to round `rid` (with its user turns if the round is new), within
+        `limit` tokens used. A round whose reply came in excerpted without the piece gets it added."""
+        nonlocal used
+        have = [i for i, t in enumerate(picked.get(rid, [])) if t.role == "assistant"]
+        if have:
+            if not LANE_EXTEND or _squash(piece) in _squash(" ".join(picked[rid][i].content for i in have)):
+                return False
+            cost = estimate_tokens(piece) + 2
+            if used + cost > limit:
+                return False
+            cur = picked[rid][have[0]]
+            t = copy.copy(cur)
+            t.content = cur.content.rstrip(" …\n") + f"\n… {piece} …"
+            if hasattr(t, "has_answer"):
+                t.has_answer = False  # benchmark bookkeeping: a cut reply does not count as recalled evidence
+            picked[rid][have[0]] = t
+            used += cost
+            return True
+        reply = copy.copy(next(t for t in rounds[rid].turns if t.role == "assistant"))
+        reply.content = piece if piece == rounds[rid].assistant_text.strip() else f"… {piece} …"
+        if hasattr(reply, "has_answer") and reply.content != rounds[rid].assistant_text:
+            reply.has_answer = False  # benchmark bookkeeping: a piece of a reply is not the whole evidence
+        turns = ([] if rid in picked else shorten(rounds[rid].user_turns)) + [reply]
+        header = 0 if rounds[rid].session_idx in sessions_touched else SESSION_HEADER_TOKENS
+        cost = header + sum(estimate_tokens(t.content) + TURN_PREFIX_TOKENS for t in turns)
+        return used + cost <= limit and take(rid, turns)
+
+    piece_order = rank([p for _, p in pieces], query, scorer, embedder) if pieces else []
     if pieces:
         lane_end = used + int(budget * reply_lane)
         lane_rounds = 0
-        for k in rank([p for _, p in pieces], query, scorer, embedder):
-            rid, piece = pieces[k]
+        for k in piece_order:
             if lane_rounds >= REPLY_LANE_MAX or used >= lane_end:
                 break
-            if any(t.role == "assistant" for t in picked.get(rid, [])):
-                continue  # already has its whole reply or a piece of it
-            reply = copy.copy(next(t for t in rounds[rid].turns if t.role == "assistant"))
-            reply.content = piece if piece == rounds[rid].assistant_text.strip() else f"… {piece} …"
-            if hasattr(reply, "has_answer") and reply.content != rounds[rid].assistant_text:
-                reply.has_answer = False  # benchmark bookkeeping: a piece of a reply is not the whole evidence
-            turns = ([] if rid in picked else shorten(rounds[rid].user_turns)) + [reply]
-            header = 0 if rounds[rid].session_idx in sessions_touched else SESSION_HEADER_TOKENS
-            cost = header + sum(estimate_tokens(t.content) + TURN_PREFIX_TOKENS for t in turns)
-            if used + cost <= lane_end and take(rid, turns):
-                lane_rounds += 1
+            lane_rounds += add_piece(*pieces[k], lane_end)
 
     # Everything else: user turns, ranked on what the user said (or keys drawn from it); a round
     # matched through a piece of its reply also gets that reply's relevant excerpt.
-    for key in ranked:
+    # When the gate found a reply that matches better than anything the user said, reply pieces
+    # also compete with user turns for the rest of the budget, fused by rank, instead of stopping
+    # at the lane's share: otherwise weak user turns from far down the ranking fill the budget
+    # while the pieces just below the lane's cut are left out.
+    order: list[tuple[str, int]] = [("key", k) for k in ranked]
+    if piece_order and REPLY_FUSE_WEIGHT:
+        score = {("key", k): 1 / (RRF_K + i) for i, k in enumerate(ranked)}
+        score.update({("piece", k): REPLY_FUSE_WEIGHT / (RRF_K + i) for i, k in enumerate(piece_order)})
+        order = sorted(score, key=score.__getitem__, reverse=True)
+    for kind, key in order:
+        if kind == "piece":
+            add_piece(*pieces[key], budget)
+            continue
         rid = owners[key]
         if from_reply[key]:
             has_reply = any(t.role == "assistant" for t in picked.get(rid, []))

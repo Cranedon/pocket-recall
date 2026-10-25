@@ -192,6 +192,18 @@ Tuned on development data only (LongMemEval, the LoCoMo dev half, and 94 real-us
 
 On a second set of 24 real-user questions written before this round, from sessions none of the earlier questions used: 5 / 15 / 16 → 5 / 16 / 17 at 2k / 4k / 8k; one question improved and none got worse. On LongMemEval nothing went down (57.4% → 57.7% at 2k, 96.8% at 8k).
 
+### 0.2: reply pieces compete with user turns
+
+The questions real users ask later are often about something the assistant worked out: a number in a table, a file name, a test result. At 8k, recall missed 15 such development questions. In each of the 13 checked, a reply piece matched better than any user turn, yet about 85% of the budget went to user turns from 125–146 rounds, most of them weak matches, while reply pieces stopped at the lane's 15%. Now, once that happens, reply pieces and user turns share the rest of the budget by rank. Tuned on development data only, then run once on 47 new questions written before this round (36 answered inside a long assistant reply, sampled with a fixed seed):
+
+| Held-out real-user questions, set 4 | 2k | 4k | 8k | 16k |
+|---|---:|---:|---:|---:|
+| Answer in an assistant reply (36), before | 0 | 12 | 18 | 23 |
+| **Answer in an assistant reply (36), now** | 0 | **25** | **26** | **27** |
+| Answer in a user turn (11), before → now | 11 → 11 | 11 → 11 | 11 → 11 | 11 → 11 |
+
+At 4k and 8k every question that changed got better; at 16k, 5 better and 1 worse. LoCoMo (both halves) did not change, since both speakers there are people and the lane never opens; on a 128-question LongMemEval sample the change was within one question at every budget.
+
 ### Larger budgets
 
 How many real-user questions recall answers completely as the budget grows (the expected words all come back):
@@ -206,7 +218,7 @@ How many real-user questions recall answers completely as the budget grows (the 
 
 ### Known limits
 
-- **Decisions written by the assistant** are recalled better since 0.2, but at 8k still only half of the held-out ones come back, and injection's 1,000 tokens almost never carry them. Claude still has to call `recall` for those, ideally with a larger budget.
+- **Details written by the assistant** need at least 4k: below that only what the user said is packed, so none of the 36 held-out ones come back at 2k, and injection's 1,000 tokens almost never carry them. At 8k about a quarter are still missed, mostly table rows and numbers whose piece matches the question poorly. Claude has to call `recall` for those, ideally with a larger budget.
 - **Between 16k and 32k, user turns still come first.** On LongMemEval, 2 single-session-assistant questions only come back at 64k, because the budget fills with user turns before replies get their turn.
 - **Developed on LongMemEval-S.** Weights such as the time boost were picked on it, which is why LoCoMo is reported as the held-out check.
 - The real-user questions behind several numbers above were written by reading the conversations. They guided development and are not a benchmark.

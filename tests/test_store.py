@@ -310,6 +310,28 @@ def test_reply_lane_finds_answers_written_by_the_assistant(tmp_path):
     off.close(), on.close()
 
 
+def test_reply_pieces_compete_with_user_turns_past_the_lane(tmp_path, monkeypatch):
+    import pocket_recall.core as core
+
+    filler = "We talked about many unrelated things that day, like the weather and the news. " * 6
+    s = MemoryStore(tmp_path / "m.db", scorer="bm25", reply_lane=0.15, full_rounds=0)
+    for day in range(1, 41):
+        s.add_session([{"role": "user", "content": f"Some chat about the weather and the news, part {day}. {filler}"},
+                       {"role": "assistant", "content": f"Sure. {filler}"}], started_at=f"2026-02-{day % 28 + 1:02d}")
+    for n in range(6):  # six relay checks, each reported only in the assistant's reply
+        s.add_session([{"role": "user", "content": "ok, go on"},
+                       {"role": "assistant", "content": f"{filler} Relay check {n}: the relay returned error "
+                        f"code E{n}{n}{n} on the token usage request. {filler}"}], started_at=f"2026-03-{n + 1:02d}")
+    question = "Which error codes did the relay return on the token usage request?"
+    found = lambda: sum(f"E{n}{n}{n}" in s.recall(question, budget_tokens=4000).text for n in range(6))
+    monkeypatch.setattr(core, "REPLY_FUSE_WEIGHT", 0.0)
+    lane_only = found()
+    monkeypatch.setattr(core, "REPLY_FUSE_WEIGHT", 1.0)
+    fused = found()
+    assert lane_only <= core.REPLY_LANE_MAX < fused == 6
+    s.close()
+
+
 def test_segments_keep_acknowledgements_with_their_topic(tmp_path):
     from pocket_recall.core import segment_rounds, split_rounds
 

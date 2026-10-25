@@ -367,7 +367,43 @@ Set 2 was written from sessions no earlier question used (a trading-strategy rev
 
 **Cost.** Recall at 8k on a 665k-token store: 0.56 s instead of 0.36 s; unchanged at 2k.
 
-## 11. Reproducing
+## 11. Reply pieces compete with user turns
+
+### Diagnosis
+
+On the real-user development questions (sets 1–3, 70 questions, 40 answered inside an assistant reply), recall at 8k missed 15, all of them reply answers. They were lost in two ways: the round came in with its user turns only (6), or its reply came in excerpted without the detail (8). In most, the piece holding the answer ranked in the top 10–50 of 2,700 reply pieces. For all 13 still missed after the lane top-up below, the lane's gate had opened (some piece matched better than any user turn), yet about 85% of the budget went to user turns from 125–146 rounds. The lane stops after 15% of the budget and 3 pieces, and it skipped rounds whose reply was already in as an excerpt, even when that excerpt lacked the piece it had ranked first.
+
+### Changes and the development sweep
+
+1. **Lane top-up:** a round whose reply is in, excerpted without the lane's piece, gets the piece added.
+2. **Fusion:** when the gate is open, the remaining reply pieces join the main loop, fused with the user-turn ranking by plain RRF (weight 1), so they compete for the whole budget rather than a fixed share.
+
+| Setting | Reply answers (40) 4k / 8k / 16k | User answers (30) 4k / 8k / 16k |
+|---|---|---|
+| Before | 22 / 25 / 36 | 30 / 30 / 30 |
+| Lane top-up | 25 / 27 / 36 | 30 / 30 / 30 |
+| Top-up + fusion, weight 0.5 | 25 / 31 / 35 | 30 / 30 / 30 |
+| **Top-up + fusion, weight 1 (chosen)** | **31 / 34 / 36** | **30 / 30 / 30** |
+| Top-up + fusion, weight 2 | 32 / 35 / 37 | 28 / 29 / 30 |
+
+Not kept: scoring excerpt units with their heading and table-header context at half weight (no change in any setting; it would also lose rows found through their header), and prepending the round's user turn to each reply piece before ranking (+1 at 8k, +2 at 16k, but every piece needs a new embedding).
+
+Regression on development data, evidence recall: a stratified 128-question LongMemEval sample went 107 → 107, 123 → 122, 127 → 128 at 4k / 8k / 16k, and the LoCoMo dev half did not change (77.2% / 84.3% / 93.3%).
+
+### Held-out results (run once)
+
+Set 4 was written before this round from the same real-user store plus everything added since (9 sessions, 528 messages). The evidence was sampled with a fixed seed: 36 assistant replies of at least 600 characters and 12 user messages, excluding any message holding an answer to sets 1–3, and one detail sentence per message, also drawn at random, so the writer could not pick easy or hard ones. One user message was skipped as a forked copy of another.
+
+| Set 4 | 2k | 4k | 8k | 16k |
+|---|---:|---:|---:|---:|
+| Reply answers (36): before → after | 0 → 0 | 12 → **25** (+13 / −0) | 18 → **26** (+8 / −0) | 23 → **27** (+5 / −1) |
+| User answers (11): before → after | 11 → 11 | 11 → 11 | 11 → 11 | 11 → 11 |
+
+The LoCoMo test half did not change at any budget (the lane never opens there). Sign test on the changed questions: p ≈ 0.0002 at 4k and 0.008 at 8k.
+
+**Cost.** Recall at 8k on the set 2 store: 0.50 s instead of 0.39 s; unchanged below 4k.
+
+## 12. Reproducing
 
 | What | Command | Cost |
 |---|---|---|
@@ -378,5 +414,6 @@ Set 2 was written from sessions no earlier question used (a trading-strategy rev
 | Injection gate and evidence | `pocket-recall eval inject --datasets lme locomo-test` | free |
 | Injection frequency on your own history | `pocket-recall eval inject --replay ~/.pocket-recall/memory.db` | free |
 | Offline dry run | `pocket-recall eval run --answer-model echo --judge-model echo` | free |
+| Another provider | `pocket-recall eval run --answer-model deepseek:deepseek-chat --judge-model claude-opus-5-5` | depends on the model; see README, "Using other models" |
 
 End-to-end runs need `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` if you use a relay. They resume after interruption and record the endpoint of each answer. Use `pocket-recall eval estimate` to see the token count and cost before you run.
