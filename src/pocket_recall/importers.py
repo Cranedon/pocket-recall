@@ -4,7 +4,8 @@
     pocket-recall import claude DB EXPORT                  # claude.ai export (zip or conversations.json)
 
 Only what you typed and the assistant's written replies are kept: tool calls, tool output,
-thinking, system notices and sub-agent runs are dropped. Original timestamps are kept, and
+thinking, system notices, shell commands run from the app with their output, and sub-agent runs
+are dropped (see tooltext). Original timestamps are kept, and
 re-running an import only adds what is new.
 """
 
@@ -12,18 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import zipfile
 from pathlib import Path
 
 from .store import MemoryStore, normalize_time
+from .tooltext import strip_tool_text
 
-_SYSTEM_TAGS = re.compile(r"<(system-reminder|local-command-[a-z]+|command-[a-z]+)>.*?</\1>", re.S)
 _NOTICE_START = ("<task-notification", "<local-command", "<command-", "<system-reminder", "Caveat:")
-
-
-def _clean(text: str) -> str:
-    return _SYSTEM_TAGS.sub("", text).strip()
 
 
 def _text_blocks(content) -> str:
@@ -61,7 +57,7 @@ def read_claude_code_session(path: Path) -> list[dict]:
             continue
         when = line.get("timestamp")
         if _is_human(line):
-            text = _clean(_text_blocks(line["message"].get("content")))
+            text = strip_tool_text(_text_blocks(line["message"].get("content")))
             if text:
                 messages.append({"role": "user", "content": text, "created_at": when})
         elif line.get("type") == "assistant" and not line.get("isSidechain") and messages:

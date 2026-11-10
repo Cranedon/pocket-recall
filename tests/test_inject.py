@@ -55,12 +55,6 @@ def test_gate_skips_tool_messages_and_follow_ups():
     assert inject.passes({**hit, "rare_hits": 2}, 0.6, recent=10)
     assert inject.passes({"text": "x", "relevance": 0.65}, 0.6)  # an older server: its gate
     assert inject.passes({**hit, "relevance": 0.1, "time_only": True, "window_records": 3}, 0.6)
-    for p in ("<task-notification>\n<task-id>b1</task-id>", "I hit my usage limit while you were working",
-              "<scheduled-task name=\"daily\">", "在您工作期间，我达到了使用限额，但现在限额已重置。"):
-        assert inject.is_system_prompt(p)
-    assert inject.is_system_prompt("<artifact-content-authored-by-others/>\nThe summary")
-    assert not inject.is_system_prompt("What did we decide about the <div> layout?")
-    assert not inject.is_system_prompt('<pasted_content id="f4e4">my notes</pasted_content>')
 
 
 def test_recent_prompts_come_from_the_transcript_tail(tmp_path):

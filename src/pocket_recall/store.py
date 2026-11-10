@@ -195,6 +195,26 @@ class MemoryStore:
             self._embedder.passages([c for c, _ in changed])
         return len(changed)
 
+    def clean_tool_text(self, dry_run: bool = False) -> tuple[int, int]:
+        """Take tool output and app messages out of stored user turns (see tooltext), which
+        versions before 0.3.1 saved as what the user said. Returns (changed, deleted)."""
+        from .tooltext import strip_tool_text
+
+        changed, deleted = [], []
+        for mid, old in self.db.execute("SELECT id, content FROM messages WHERE role = 'user'"):
+            new = strip_tool_text(old)
+            if not new:
+                deleted.append((mid,))
+            elif new != old.strip():  # surrounding whitespace alone is not tool text
+                changed.append((new, mid))
+        if not dry_run:
+            with self.db:
+                self.db.executemany("UPDATE messages SET content = ? WHERE id = ?", changed)
+                self.db.executemany("DELETE FROM messages WHERE id = ?", deleted)
+            if changed and self._embedder:
+                self._embedder.passages([c for c, _ in changed])
+        return len(changed), len(deleted)
+
     def forget_session(self, session_id: str) -> bool:
         self.facts.forget(session_id)
         with self.db:

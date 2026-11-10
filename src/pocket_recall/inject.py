@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import socket
 import sys
 import time
 from pathlib import Path
+
+from .tooltext import strip_tool_text
 
 RUN_DIR = Path("~/.pocket-recall/run").expanduser()
 DEFAULT_BUDGET = 1000
@@ -48,15 +49,6 @@ RECENT_PROMPTS = 30
 # output and images can hold only a few prompts in their last megabytes.
 TAIL_READS = (2_000_000, 16_000_000)
 MAX_PROMPT_LINE = 200_000  # longer transcript lines are tool output, skipped without parsing
-# Text that Claude Code or the user's tools type into the prompt; it is not a question to look up.
-SYSTEM_PROMPT = re.compile(
-    r"^\s*<(?!pasted_content)[a-z][a-z0-9_-]*(\s[^>]*)?/?>|"  # <task-notification>, <bash-input>, ... (not a paste)
-    r"^\s*(I hit my usage limit|在您工作期间，我达到了使用限额|This session is being continued|"
-    r"\[Request interrupted|Caveat: )")
-
-
-def is_system_prompt(prompt: str) -> bool:
-    return bool(SYSTEM_PROMPT.search(prompt))
 
 
 def recent_prompts(transcript_path: str, limit: int = RECENT_PROMPTS) -> tuple[list[str], bool]:
@@ -86,12 +78,13 @@ def recent_prompts(transcript_path: str, limit: int = RECENT_PROMPTS) -> tuple[l
             content = msg.get("content") if isinstance(msg, dict) else None
             if e.get("type") != "user" or e.get("isMeta") or e.get("isSidechain") or not isinstance(content, str):
                 continue
-            content = content.strip()
-            if len(content) >= MIN_PROMPT_CHARS and not content.startswith("/") and not is_system_prompt(content):
+            content = strip_tool_text(content)
+            if len(content) >= MIN_PROMPT_CHARS and not content.startswith("/"):
                 out.append(content)
         if whole or len(out) >= limit:
             break
     return out[-limit:], whole
+
 
 def session_id_for(transcript_path: str) -> str:
     """The id the Stop hook and the importer give this transcript's session."""
@@ -181,8 +174,9 @@ def main() -> None:
         if os.environ.get("POCKET_RECALL_INJECT", "1") == "0":
             return
         payload = json.load(sys.stdin)
-        prompt = (payload.get("prompt") or "").strip()
-        if len(prompt) < MIN_PROMPT_CHARS or prompt.startswith("/") or is_system_prompt(prompt):
+        # what the user wrote, without tool output and app messages; nothing left means nothing to look up
+        prompt = strip_tool_text(payload.get("prompt") or "")
+        if len(prompt) < MIN_PROMPT_CHARS or prompt.startswith("/"):
             return
         transcript = payload.get("transcript_path") or ""
         session = session_id_for(transcript) if transcript else ""

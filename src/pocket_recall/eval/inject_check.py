@@ -74,7 +74,8 @@ def check(name: str, budget: int, threshold: float, n: int | None, seed: int = 0
 def replay(path, budget: int, threshold: float) -> str:
     from datetime import datetime
 
-    from ..inject import MIN_PROMPT_CHARS, RECENT_PROMPTS, is_system_prompt
+    from ..inject import MIN_PROMPT_CHARS, RECENT_PROMPTS
+    from ..tooltext import strip_tool_text
     from ..store import MemoryStore
 
     store = MemoryStore(path)
@@ -83,11 +84,11 @@ def replay(path, budget: int, threshold: float) -> str:
         seen: list[int] = []
         recent: list[str] = []
         for m in sess.messages:
-            text = m.content.strip()
-            if m.role != "user" or len(text) < MIN_PROMPT_CHARS or text.startswith("/"):
+            if m.role != "user" or len(m.content.strip()) < MIN_PROMPT_CHARS or m.content.lstrip().startswith("/"):
                 continue
             prompts += 1
-            if is_system_prompt(text):
+            text = strip_tool_text(m.content)
+            if len(text) < MIN_PROMPT_CHARS:
                 continue
             now = datetime.fromisoformat(m.created_at)
             context = recent[-RECENT_PROMPTS:]

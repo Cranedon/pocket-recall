@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1
+
+- **Tool output is no longer saved as what you said.** Claude Code puts more than your words into a user turn: shell commands run from the app with their whole output (`<bash-input>`, `<bash-stdout>`), the state of an open artifact, "[Request interrupted by user]", the app's "usage limit … reset" message. Earlier versions stored these as your turns; in the author's store they were 39 of 427 user messages, and on 150 replayed real prompts they showed up in 39% of 2k recalls and 79% of 8k recalls (7% and 12% of the recalled text); a recall about a server migration came back half `ssh … docker compose up` echoes. The importer and the Stop hook now keep only what you wrote (a question typed after an artifact's state block stays, the block goes), and injection looks up that same text instead of skipping the prompt.
+- **`pocket-recall clean DB`** takes such text out of a store written before (`--dry-run` to count first). Run it once on `~/.pocket-recall/memory.db` after updating.
+
 ## 0.3.0
 
 - **Automatic injection recalibrated on two weeks of real use.** Reviewing what the 0.2 gate injected into the author's own Claude Code sessions: 49 injections, 11 of them on messages that tools type into the prompt (background-task notifications, "usage limit reset", scheduled tasks), and none of the other 38 clearly useful. Most real prompts are follow-ups inside a long session, and in one person's chats the best memory match scores 0.6 to almost anything. The hook now skips tool messages, and memory is injected only when its best match beats the session's own recent prompts and, past a session's first 3 prompts, shares at least 2 rare words with the prompt. Questions asked at the start of a session, which is how benchmark questions are asked, go through the 0.2 gate unchanged. Replaying about 715 real prompts through the hook's logic, injections fell from 27% of prompts to 6%, and from about 124 to 49 tokens per prompt; 40% of those "prompts" were tool messages. Chosen on one half of the prompts and checked on the other.

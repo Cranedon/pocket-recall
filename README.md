@@ -273,6 +273,7 @@ pocket-recall hook      Claude Code Stop hook: save the session's new turns
 pocket-recall inject    Claude Code prompt hook: add relevant memory to the prompt
 pocket-recall import    import Claude Code sessions or a claude.ai export
 pocket-recall redact    mask secrets in a store written before redaction was on
+pocket-recall clean     take tool output saved as user turns out of a store (before 0.3.1)
 pocket-recall web       local web page to browse stores and try recall
 pocket-recall facts     extract facts with an LLM (needs pocket-recall[facts])
 pocket-recall eval      LongMemEval / LoCoMo harness (needs pocket-recall[eval])

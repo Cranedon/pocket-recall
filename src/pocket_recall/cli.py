@@ -11,6 +11,7 @@ COMMANDS = {
     "inject": ("pocket_recall.inject", "Claude Code UserPromptSubmit hook: add relevant memory to the prompt"),
     "import": ("pocket_recall.importers", "import Claude Code sessions or a claude.ai export"),
     "redact": ("pocket_recall.redact", "mask secrets in a store written before redaction was on"),
+    "clean": ("pocket_recall.tooltext", "take tool output saved as user turns out of a store"),
     "web": ("pocket_recall.web", "local web page to browse stores and try recall"),
     "facts": ("pocket_recall.facts", "extract facts with an LLM (needs pocket-recall[facts])"),
     "eval": ("pocket_recall.eval.run", "LongMemEval harness (needs pocket-recall[eval])"),
