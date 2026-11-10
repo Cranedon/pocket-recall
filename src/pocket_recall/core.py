@@ -183,19 +183,46 @@ what how when which who with about from that this have has had any can could wou
 its be been there their they them your our""".split())
 
 
-def _content_words(text: str) -> set[str]:
-    return {w.lower() for w in _WORD.findall(_cjk_bigrams(text)) if len(w) > 1} - _GATE_STOP - _ZH_STOP_PAIRS
+@functools.lru_cache(maxsize=65536)
+def _content_words(text: str) -> frozenset[str]:
+    return frozenset({w.lower() for w in _WORD.findall(_cjk_bigrams(text)) if len(w) > 1} - _GATE_STOP - _ZH_STOP_PAIRS)
+
+
+GATE_RARE_DF = 0.02  # a content word in at most this share of keys counts as rare
+
+
+def gate_scores(texts: list[str], query: str, embedder: EmbedderLike, context: Sequence[str] = ()) -> dict:
+    """Signals for the injection gate (see inject.passes), computed over the memory keys `texts`:
+
+    relevance  best cosine plus the share of the query's content words the best keys share (0-1.3)
+    cos        the best cosine alone
+    own        best cosine to `context`, the current session's recent prompts: a follow-up that
+               matches its own conversation better than memory does not need memory
+    rare_hits  content words of the query that are rare among the keys and found in the best keys.
+               Real prompts resemble generic lines ("继续处理", "现在啥情况") about as much as
+               anything, so deep in a session a match must also share something specific.
+    """
+    if not texts:
+        return {"relevance": 0.0, "cos": 0.0, "own": 0.0, "rare_hits": 0}
+    q = embedder.query(query)
+    scores = embedder.passages(texts) @ q
+    words = _content_words(query)
+    best = np.argsort(-scores)[:5]
+    cover = max(len(words & _content_words(texts[i])) / max(len(words), 1) for i in best)
+    df: dict[str, int] = {}
+    for t in texts:
+        for w in _content_words(t) & words:
+            df[w] = df.get(w, 0) + 1
+    rare = {w for w in words if df.get(w, 0) <= max(1, GATE_RARE_DF * len(texts))}
+    hits = sum(any(w in _content_words(texts[i]) for i in best) for w in rare)
+    own = float((embedder.passages(list(context)) @ q).max()) if context else 0.0
+    top = float(scores.max())
+    return {"relevance": top + GATE_COVER_WEIGHT * cover, "cos": top, "own": own, "rare_hits": hits}
 
 
 def relevance(texts: list[str], query: str, embedder: EmbedderLike) -> float:
     """How likely it is that `texts` hold something about `query`, roughly 0-1.3."""
-    if not texts:
-        return 0.0
-    scores = embedder.passages(texts) @ embedder.query(query)
-    words = _content_words(query)
-    best = np.argsort(-scores)[:5]
-    cover = max(len(words & _content_words(texts[i])) / max(len(words), 1) for i in best)
-    return float(scores.max()) + GATE_COVER_WEIGHT * cover
+    return gate_scores(texts, query, embedder)["relevance"]
 
 
 # Topical segments (after SeCom, ICLR 2025, and CPP, SIGDIAL 2026): consecutive rounds about one
@@ -516,6 +543,7 @@ def select(
     max_reply_tokens: int | None = None,
     segment_weight: float | None = None,
     prf_weight: float | None = None,
+    lane_min_budget: int | None = None,
 ) -> dict[int, list]:
     """Pick rounds for `query` within `budget` tokens: round index -> turns to include.
 
@@ -534,7 +562,8 @@ def select(
     which user-first packing would otherwise only see through the few whole rounds.
     `reply_lane` (a share of the budget, e.g. 0.15) instead ranks reply pieces on their own and
     adds up to REPLY_LANE_MAX of the best ones, each with its round's user turns, within that share;
-    the rest then compete with user turns for the remaining budget (REPLY_FUSE_WEIGHT).
+    the rest then compete with user turns for the remaining budget (REPLY_FUSE_WEIGHT). The lane
+    opens from `lane_min_budget` tokens (default REPLY_LANE_MIN_BUDGET).
     `fill_replies` spends what is left after every ranked user turn on making the picked rounds
     whole, best first: their replies, and pasted documents that were excerpted. A budget larger
     than everything the user said so moves toward the full, verbatim history instead of sitting
@@ -630,7 +659,8 @@ def select(
 
     pieces = ([(rid, piece) for rid, r in enumerate(rounds) if r.assistant_text
                for piece in chunk_text(r.assistant_text, ASSISTANT_KEY_TOKENS)]
-              if reply_lane and budget >= REPLY_LANE_MIN_BUDGET else [])
+              if reply_lane and budget >= (REPLY_LANE_MIN_BUDGET if lane_min_budget is None else lane_min_budget)
+              else [])
     if pieces and embedder is not None and LANE_ADAPTIVE:
         # Only when a reply matches the question better than anything the user said: then the
         # answer is likely the assistant's own conclusion. Otherwise the lane would only take

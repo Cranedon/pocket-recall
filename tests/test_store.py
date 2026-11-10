@@ -153,7 +153,8 @@ def test_utc_times_are_stored_as_local_time():
 
     out = normalize_time("2025-03-14T09:30:00Z")
     assert datetime.fromisoformat(out) == datetime.fromisoformat("2025-03-14T09:30:00+00:00")
-    assert out[-6:] == datetime.now().astimezone().isoformat()[-6:]  # local offset
+    # local offset on that date (which can differ from today's across daylight saving time)
+    assert out[-6:] == datetime.fromisoformat("2025-03-14T09:30:00+00:00").astimezone().isoformat()[-6:]
 
 
 def test_mcp_keeps_original_dates_and_rejects_bad_ones(tmp_path, monkeypatch):

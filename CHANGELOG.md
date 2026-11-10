@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+- **Automatic injection recalibrated on two weeks of real use.** Reviewing what the 0.2 gate injected into the author's own Claude Code sessions: 49 injections, 11 of them on messages that tools type into the prompt (background-task notifications, "usage limit reset", scheduled tasks), and none of the other 38 clearly useful. Most real prompts are follow-ups inside a long session, and in one person's chats the best memory match scores 0.6 to almost anything. The hook now skips tool messages, and memory is injected only when its best match beats the session's own recent prompts and, past a session's first 3 prompts, shares at least 2 rare words with the prompt. Questions asked at the start of a session, which is how benchmark questions are asked, go through the 0.2 gate unchanged. Replaying about 715 real prompts through the hook's logic, injections fell from 27% of prompts to 6%, and from about 124 to 49 tokens per prompt; 40% of those "prompts" were tool messages. Chosen on one half of the prompts and checked on the other.
+- **Injected memory carries answers written by the assistant.** The reply lane now opens at the injection budget: on 117 real-user questions about the past, injections that held the answer went from 32 to 55, and from 1 to 24 of 58 among those answered inside an assistant reply. On LongMemEval, evidence is complete in 71.2% of injections instead of 75.4%, since reply pieces take budget from user turns there.
+- The hook sends the session's recent prompts (read from the end of its transcript) with each request; a server from 0.2 ignores them and keeps its gate. `pocket-recall eval inject` uses the same gate and lane.
+- A test no longer assumes today's UTC offset holds for a date across daylight saving time.
+
 ## 0.2.0
 
 - **Automatic memory injection.** A new UserPromptSubmit hook asks the running MCP server (over a local socket, so the model is already loaded) for memory relevant to each prompt and adds up to 1,000 tokens to Claude's context when a relevance gate passes. The current session is excluded, a message is never injected twice in one session, and questions that only name a period ("what did I do last week") pass when that period has records. It adds 0.1–0.3 s to a prompt. In a replay of real Claude Code sessions, 40% of prompts got an injection, about 500 tokens each. Turn it off with `POCKET_RECALL_INJECT=0`.

@@ -13,9 +13,9 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
-from .core import REPLY_LANE_SHARE, estimate_tokens, relevance, select, split_rounds
+from .core import REPLY_LANE_SHARE, estimate_tokens, gate_scores, select, split_rounds
 from .embed import Embedder, Reranker
 from .facts import DEFAULT_MODEL as FACTS_MODEL, Extractor, FactStore
 from .redact import enabled as redact_enabled, redact
@@ -91,6 +91,7 @@ class Recall:
     time_only: bool = False  # the question named only a time, so that period came strictly first
     window_records: int = 0  # rounds dated inside `window`; 0 means nothing happened then
     relevance: float | None = None  # gate score (core.relevance); None without embeddings
+    gate: dict | None = None  # all injection-gate signals (core.gate_scores); None without embeddings
 
     @property
     def text(self) -> str:
@@ -245,12 +246,15 @@ class MemoryStore:
         return [s for s in sessions.values() if s.messages]
 
     def recall(self, query: str, budget_tokens: int = 8000, *, now: datetime | None = None,
-               exclude_sessions: Iterable[str] = ()) -> Recall:
+               exclude_sessions: Iterable[str] = (), gate_context: Sequence[str] = (),
+               lane_min_budget: int | None = None) -> Recall:
         """The history most relevant to `query` that fits in `budget_tokens`.
 
         Time words in the query ("上周", "in March", "two weeks ago") are read relative to `now`
         and conversations from that period are ranked higher. `exclude_sessions` leaves out
-        sessions already in the assistant's context, such as the current one.
+        sessions already in the assistant's context, such as the current one; `gate_context` is
+        that session's recent prompts, used only for the injection gate's signals.
+        `lane_min_budget` lets the reply lane open below its usual 4k tokens.
         """
         skip = set(exclude_sessions)
         sessions = [s for s in self._sessions() if s.session_id not in skip]
@@ -281,9 +285,10 @@ class MemoryStore:
             max_turn_tokens=self.max_turn_tokens,
             max_reply_tokens=max(self.max_turn_tokens, budget_tokens // 8) if self.max_turn_tokens else None,
             extra_keys=fact_keys, assistant_keys=self.assistant_keys, reply_lane=self.reply_lane,
-            fill_replies=True,
+            fill_replies=True, lane_min_budget=lane_min_budget,
         )
-        score = relevance([r.user_text for r in rounds], query, self._embedder) if self._embedder else None
+        gate = gate_scores([r.user_text for r in rounds], query, self._embedder, gate_context) if self._embedder else None
+        score = gate["relevance"] if gate else None
 
         def build() -> Recall:
             by_session: dict[int, list[Message]] = {}
@@ -298,7 +303,7 @@ class MemoryStore:
                 for si, msgs in by_session.items()
             ]
             return Recall(query, recalled, rounds_considered=len(rounds), window=window, time_only=time_only,
-                          window_records=in_window, relevance=score)
+                          window_records=in_window, relevance=score, gate=gate)
 
         result = build()
         # select() estimates formatting per turn; the rendered text (session headers, dated
@@ -310,12 +315,18 @@ class MemoryStore:
         return result
 
     def for_injection(self, query: str, budget_tokens: int = 1000, *, exclude_sessions: Iterable[str] = (),
-                      seen: Iterable[int] = (), now: datetime | None = None) -> dict:
+                      seen: Iterable[int] = (), now: datetime | None = None, context: Sequence[str] = ()) -> dict:
         """What automatic injection would add for `query`: a recall without the current session,
         minus messages already injected earlier in it (`seen`, message ids). If the best-matching
         session brings nothing new, nothing is added: follow-up prompts on the same topic would
-        otherwise re-inject the same history every time."""
-        r = self.recall(query, budget_tokens, now=now, exclude_sessions=exclude_sessions)
+        otherwise re-inject the same history every time. `context` is the current session's recent
+        prompts; the gate signals come back with the result and inject.passes decides.
+
+        The reply lane opens at any budget here: injection only fires when memory stands out, and
+        then the answer is often a conclusion the assistant wrote, which user turns alone miss
+        (on real-user questions answered in a reply, 24 of 58 injections carried it instead of 1)."""
+        r = self.recall(query, budget_tokens, now=now, exclude_sessions=exclude_sessions, gate_context=context,
+                        lane_min_budget=0)
         seen = set(seen)
         fresh = [RecalledSession(x.session_id, x.started_at, [m for m in x.messages if m.id not in seen], x.rank)
                  for x in r.sessions]
@@ -323,7 +334,7 @@ class MemoryStore:
         r.sessions = [x for x in fresh if x.messages] if top_is_new else []
         return {"text": r.text if r.sessions else "", "relevance": r.relevance, "time_only": r.time_only,
                 "window_records": r.window_records, "ids": [m.id for x in r.sessions for m in x.messages],
-                "tokens_est": r.tokens_est if r.sessions else 0}
+                "tokens_est": r.tokens_est if r.sessions else 0, **(r.gate or {})}
 
     def list_sessions(self, *, search: str = "", limit: int = 50, offset: int = 0) -> tuple[int, list[dict]]:
         """(total, page) of sessions, newest first, optionally only those containing `search`."""

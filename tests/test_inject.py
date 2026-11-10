@@ -46,6 +46,50 @@ def test_injects_relevant_memory_and_skips_the_rest(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(mcp_server, "_store", None)
 
 
+def test_gate_skips_tool_messages_and_follow_ups():
+    hit = {"text": "x", "relevance": 0.8, "cos": 0.8, "own": 0.3, "rare_hits": 0}
+    assert inject.passes(hit, 0.6)
+    assert not inject.passes({**hit, "relevance": 0.5}, 0.6)
+    assert not inject.passes({**hit, "own": 0.75}, 0.6)  # the session's own prompts match as well
+    assert not inject.passes(hit, 0.6, recent=10)  # deep in a session it must share rare words
+    assert inject.passes({**hit, "rare_hits": 2}, 0.6, recent=10)
+    assert inject.passes({"text": "x", "relevance": 0.65}, 0.6)  # an older server: its gate
+    assert inject.passes({**hit, "relevance": 0.1, "time_only": True, "window_records": 3}, 0.6)
+    for p in ("<task-notification>\n<task-id>b1</task-id>", "I hit my usage limit while you were working",
+              "<scheduled-task name=\"daily\">", "在您工作期间，我达到了使用限额，但现在限额已重置。"):
+        assert inject.is_system_prompt(p)
+    assert inject.is_system_prompt("<artifact-content-authored-by-others/>\nThe summary")
+    assert not inject.is_system_prompt("What did we decide about the <div> layout?")
+    assert not inject.is_system_prompt('<pasted_content id="f4e4">my notes</pasted_content>')
+
+
+def test_recent_prompts_come_from_the_transcript_tail(tmp_path):
+    t = tmp_path / "s.jsonl"
+    lines = [{"type": "user", "message": {"role": "user", "content": f"prompt number {i} about the database"}}
+             for i in range(40)]
+    lines += [{"type": "user", "message": {"role": "user", "content": "<task-notification>done</task-notification>"}},
+              {"type": "user", "isMeta": True, "message": {"role": "user", "content": "meta text that is long enough"}},
+              {"type": "assistant", "message": {"role": "assistant", "content": "an answer"}},
+              {"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}}]
+    t.write_text("\n".join(json.dumps(x) for x in lines) + "\nnot json\n")
+    got, whole = inject.recent_prompts(str(t))
+    assert whole and len(got) == inject.RECENT_PROMPTS and got[-1] == "prompt number 39 about the database"
+    assert inject.recent_prompts(str(tmp_path / "missing.jsonl")) == ([], True)
+
+
+def test_recent_prompts_widen_past_tool_output(tmp_path, monkeypatch):
+    monkeypatch.setattr(inject, "TAIL_READS", (3_000, 1_000_000))
+    t = tmp_path / "s.jsonl"
+    prompts = [{"type": "user", "message": {"role": "user", "content": f"question {i} about the relay"}} for i in range(5)]
+    output = [{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x" * 1_000}]}}
+              for _ in range(10)]
+    t.write_text("\n".join(json.dumps(x) for x in prompts + output))
+    got, whole = inject.recent_prompts(str(t))
+    assert whole and got[-1] == "question 4 about the relay"  # found by the wider read
+    monkeypatch.setattr(inject, "TAIL_READS", (3_000,))
+    assert inject.recent_prompts(str(t)) == ([], False)  # only tool output read: not a new session
+
+
 def test_no_server_means_no_injection(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(inject, "RUN_DIR", tmp_path / "nothing-here")
     assert run_hook(monkeypatch, capsys, "What did I say about my peanut allergy?") is None

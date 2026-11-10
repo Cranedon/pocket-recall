@@ -96,12 +96,12 @@ These design choices come from measurements, not guesses (details in the [evalua
 
 Claude only benefits from memory if it calls `recall`, and it does not always know when to. Like claude-mem, pocket-recall can add memory to a prompt on its own, but without an LLM summarising each step:
 
-1. Before Claude sees a prompt, the hook asks the already-running MCP server over a local socket (about 0.1–0.3 s).
+1. Before Claude sees a prompt, the hook asks the already-running MCP server over a local socket (about 0.1–0.4 s).
 2. The server recalls up to 1,000 tokens for the prompt, leaving out the current session, which is already in Claude's context.
-3. A **relevance gate** decides whether to add it: the best cosine match plus a bonus for shared content words. Questions that only name a period ("what did I do last week") pass when that period has records.
+3. A **gate** decides whether to add it. The match must be relevant (best cosine plus a bonus for shared content words) and match better than the session's own recent prompts, since a follow-up's context is already in the conversation. Past a session's first few prompts it must also share rare words with the prompt. Questions that only name a period ("what did I do last week") pass when that period has records.
 4. A message is never injected twice in one session. If the best match brings nothing new, nothing is added, so follow-ups on one topic do not repeat the same history.
 
-Short prompts ("ok", "继续") and slash commands are skipped, and any problem means no injection rather than a blocked prompt. Turn it off with `POCKET_RECALL_INJECT=0`.
+Short prompts ("ok", "继续"), slash commands and text that tools type into the prompt (task notifications, "usage limit reset") are skipped, and any problem means no injection rather than a blocked prompt. Turn it off with `POCKET_RECALL_INJECT=0`.
 
 ## Results
 
@@ -204,6 +204,26 @@ The questions real users ask later are often about something the assistant worke
 
 At 4k and 8k every question that changed got better; at 16k, 5 better and 1 worse. LoCoMo (both halves) did not change, since both speakers there are people and the lane never opens; on a 128-question LongMemEval sample the change was within one question at every budget.
 
+### 0.3: injection recalibrated on real use
+
+0.2's gate was chosen on benchmark questions, which all ask about the past. Two weeks of the author's own Claude Code use showed what that misses: 49 injections, 11 of them on messages that tools type into the prompt (task notifications, "usage limit reset"), and none of the other 38 clearly useful. Most real prompts are follow-ups inside a long session ("Rerun Bybit", "你用中文解释一下"), and against one person's chats the best memory match scores 0.6 to almost anything, usually through generic lines like "继续处理".
+
+0.3 skips tool messages (40% of what arrives as a "prompt"), and injects only when memory matches better than the session's own recent prompts and, past a session's first 3 prompts, shares at least 2 rare words with the prompt. It was chosen on half of about 715 real prompts from those transcripts, each replayed against the real store without its own session, and checked on the other half. A question asked at the start of a session, which is how every benchmark and real-user question about the past is asked, goes through 0.2's gate unchanged. When injection fires, the reply lane now opens at its 1,000-token budget.
+
+| Replay of real prompts through the hook's logic | Prompts that get an injection | Tokens injected per prompt |
+|---|---:|---:|
+| 0.2 | 27% | 124 |
+| **0.3** | **6%** | **49** |
+
+| 117 real-user questions about the past | Injections | Holding the answer |
+|---|---:|---:|
+| 0.2 | 90 | 32 |
+| **0.3** | 90 | **55** |
+| ↳ answer inside an assistant reply | 58 | 1 → **24** |
+| ↳ answer in a user turn | 32 | 31 → 31 |
+
+On the benchmarks the gate fires exactly as before (LongMemEval 71.7% with memory / 10.9% without; LoCoMo test half 97.3% / 6.6%). Opening the lane at 1k costs LongMemEval some evidence (complete when it fires: 75.4% → 71.2%), because reply pieces take budget from user turns there; LoCoMo has no assistant replies and does not change. Of the 43 replayed prompts that still get an injection, about 4 are useful: injection now costs little, but a follow-up rarely needs another session, and Claude's own `recall` calls remain the main way in.
+
 ### Larger budgets
 
 How many real-user questions recall answers completely as the budget grows (the expected words all come back):
@@ -218,7 +238,8 @@ How many real-user questions recall answers completely as the budget grows (the 
 
 ### Known limits
 
-- **Details written by the assistant** need at least 4k: below that only what the user said is packed, so none of the 36 held-out ones come back at 2k, and injection's 1,000 tokens almost never carry them. At 8k about a quarter are still missed, mostly table rows and numbers whose piece matches the question poorly. Claude has to call `recall` for those, ideally with a larger budget.
+- **Details written by the assistant** need at least 4k in `recall`: below that only what the user said is packed, so none of the 36 held-out ones come back at 2k. At 8k about a quarter are still missed, mostly table rows and numbers whose piece matches the question poorly. Injection opens the reply lane at 1k and carries 24 of the 58 real-user reply answers it fires on.
+- **When injection fires, it fills the budget.** Next to the matching rounds it packs weakly related user turns to fill 1,000 tokens; injecting only the rounds that really match is the next step.
 - **Between 16k and 32k, user turns still come first.** On LongMemEval, 2 single-session-assistant questions only come back at 64k, because the budget fills with user turns before replies get their turn.
 - **Developed on LongMemEval-S.** Weights such as the time boost were picked on it, which is why LoCoMo is reported as the held-out check.
 - The real-user questions behind several numbers above were written by reading the conversations. They guided development and are not a benchmark.
@@ -241,7 +262,7 @@ How many real-user questions recall answers completely as the budget grows (the 
 | `POCKET_RECALL_REPLY_LANE` | `0.15` | Share of the budget (from 4k tokens on) for pieces of assistant replies; `0` turns it off |
 | `POCKET_RECALL_INJECT` | `1` | `0` turns automatic injection off |
 | `POCKET_RECALL_INJECT_BUDGET` | `1000` | Tokens injected at most per prompt |
-| `POCKET_RECALL_INJECT_THRESHOLD` | `0.6` | Relevance needed to inject; higher injects less often |
+| `POCKET_RECALL_INJECT_THRESHOLD` | `0.6` | Relevance needed to inject (the other gate conditions apply too); higher injects less often |
 | `POCKET_RECALL_ASSISTANT_KEYS` | unset | `1` mixes chunks of assistant replies into the main ranking (0.1 experiment, superseded by the reply lane) |
 
 ## Command line

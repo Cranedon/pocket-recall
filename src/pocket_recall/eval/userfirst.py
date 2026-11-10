@@ -50,6 +50,7 @@ class UserFirstRetrieval:
         self.time = time
         self.assistant = assistant
         self.lane = lane
+        self.lane_min_budget: int | None = None  # None: the lane opens from core.REPLY_LANE_MIN_BUDGET
         self.fill = fill
         self.seg = seg
         self.prf = prf
@@ -106,6 +107,7 @@ class UserFirstRetrieval:
             window_strict=bool(ref) and is_time_only(ref[1]),
             assistant_keys=self.assistant,
             reply_lane=REPLY_LANE_SHARE if self.lane else 0.0,
+            lane_min_budget=self.lane_min_budget,
             fill_replies=self.fill,
             segment_weight=None if self.seg else 0.0,
             prf_weight=None if self.prf else 0.0,

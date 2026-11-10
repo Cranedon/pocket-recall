@@ -113,14 +113,15 @@ def memory_stats() -> str:
 
 
 class _InjectHandler(socketserver.StreamRequestHandler):
-    """One JSON line in ({"query", "budget", "exclude", "seen"}), one JSON line out (see inject.py)."""
+    """One JSON line in ({"query", "budget", "exclude", "seen", "context"}), one JSON line out (see inject.py)."""
 
     def handle(self) -> None:
         try:
             req = json.loads(self.rfile.readline())
             with _lock:
                 out = store().for_injection(str(req["query"]), int(req.get("budget", 1000)),
-                                            exclude_sessions=req.get("exclude") or (), seen=req.get("seen") or ())
+                                            exclude_sessions=req.get("exclude") or (), seen=req.get("seen") or (),
+                                            context=[str(c) for c in req.get("context") or ()][-30:])
         except Exception as e:  # report, never crash the server
             out = {"error": f"{type(e).__name__}: {e}"}
         self.wfile.write(json.dumps(out, ensure_ascii=False).encode() + b"\n")

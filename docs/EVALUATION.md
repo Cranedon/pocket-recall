@@ -403,7 +403,72 @@ The LoCoMo test half did not change at any budget (the lane never opens there). 
 
 **Cost.** Recall at 8k on the set 2 store: 0.50 s instead of 0.39 s; unchanged below 4k.
 
-## 12. Reproducing
+## 12. Injection, recalibrated on real use (0.3)
+
+### What two weeks of real use showed
+
+From 0.2's install to the review (Oct 25 – Nov 10), the author's Claude Code transcripts held about 420 prompts. The hook injected 49 times. 11 of those "prompts" were text that tools type into the prompt: background-task notifications, scheduled tasks, "I hit my usage limit … it has reset now" (relevance 1.30, matching earlier copies of the same sentence). Reading the other 38 next to what they injected, none was clearly useful and 4–5 were on an adjacent topic; most injected lists of the user's instructions from other projects. Relevance clustered at 0.60–0.69, just over the gate. Claude called `recall` on its own 4 times, all in the development session.
+
+### Data
+
+- **Real prompts (negatives, mostly):** about 715 prompts from those transcripts (Oct 18 – Nov 10), each asked against a snapshot of the real store (5 sessions, 423 user messages) without its own session, as the hook does. 283 of them are tool messages. Split into halves by `sha1(prompt)`: one to choose the rule, one to check it.
+- **Questions about the past (positives):** the 117 real-user questions of sets 1–4 against their own stores, asked as at the start of a session. Sets 1–3 for development, set 4 as the check.
+- **Benchmarks:** `pocket-recall eval inject` on LongMemEval and the LoCoMo dev half for development; the LoCoMo test half as before.
+
+### Development sweep
+
+Dev half: 217 real prompts that are not tool messages, 70 questions about the past. "Answer" = the expected words are in the 1k injection, without the reply lane.
+
+| Rule (relevance ≥ 0.6 throughout) | Real prompts that fire | Questions that fire (answer in it) | LoCoMo dev with / without memory |
+|---|---:|---:|---:|
+| 0.2 gate | 124, plus 104 tool messages | 49 (23) | 98% / 14% |
+| relevance ≥ 0.7 instead | 45 | 26 (13) | |
+| best match ≥ 3 SD above all keys (z ≥ 3) | 46 | 37 (19) | |
+| hub-corrected cosine ≥ 0.2 (CSLS-style) | 8 | 12 (7) | |
+| beats the session's own recent prompts by 0.1 | 54 | 49 (23) | 98% / 14% |
+| ↳ and z ≥ 3, and rare words past 3 prompts | 13 | 37 (19) | 54% / 13% |
+| **↳ and, past 3 prompts, ≥ 2 rare words shared (chosen)** | **21** | **49 (23)** | **98% / 14%** |
+
+The own-session condition is the one that separates the two kinds of prompt: a follow-up matches its own conversation, a question about the past arrives with none. Raising the threshold, or z, also suppresses questions about the past. z looked good on real prompts but halves LoCoMo: a LoCoMo conversation keeps returning to a few topics, so the line that matches stands only 2.4–4.2 standard deviations above the rest (LongMemEval: 3.5–6), the same weakness as "best cosine minus top-20 mean" in section 8. It was dropped. Subtracting each key's mean similarity to its neighbours (a CSLS-style hubness correction, against generic lines like "继续处理") cut questions as much as noise.
+
+### Check (run once)
+
+On the other half (222 real prompts that are not tool messages): the 0.2 gate fires on 124 and on 104 tool messages, the chosen rule on 24. Set 4's 47 questions fire 41 times under both, since they are asked at the start of a session.
+
+### The reply lane at the injection budget
+
+When injection fires, its answer is often a conclusion the assistant wrote, and at 1k the lane used to stay closed (it opens from 4k in `recall`). Opening it for injection:
+
+| 117 questions about the past | Injections | Answer in it, lane from 4k | Answer in it, lane at 1k |
+|---|---:|---:|---:|
+| Answer inside an assistant reply | 58 | 1 | **24** |
+| Answer in a user turn | 32 | 31 | 31 |
+
+A 1,500-token budget would carry more (on the questions that fire under the z variant, 20 of 34 reply answers instead of 13), at 50% more tokens per injection; the budget stays 1,000 (`POCKET_RECALL_INJECT_BUDGET`). Benchmarks, `pocket-recall eval inject`:
+
+| Injection, 1k | fires with memory | fires without memory | evidence complete when fired | evidence injected overall |
+|---|---:|---:|---:|---:|
+| LongMemEval (470 q), 0.2 | 71.7% | 10.9% | 75.4% | 54.0% |
+| **LongMemEval, 0.3** | 71.7% | 10.9% | 71.2% | 51.1% |
+| LoCoMo dev half (801 q), 0.3 | 97.5% | 13.9% | 62.4% | 60.8% |
+| LoCoMo test half (730 q), 0.3 | 97.3% | 6.6% | 62.1% | 60.4% |
+
+The lane costs LongMemEval 4 points of complete evidence: there the answers sit in user turns, and a reply piece takes part of the 1k. LoCoMo has no assistant replies and is unchanged.
+
+### Real use, replayed
+
+Every transcript in order, through the hook's full logic (tool messages skipped, no repeats within a session, the session's recent prompts as context):
+
+| | Prompts that get an injection | Tokens injected per prompt |
+|---|---:|---:|
+| 0.2 | 27% | 124 |
+| **0.3** | **6%** (43 of ~715) | **49** |
+
+Of the 43, about 4 are useful (a cross-exchange arbitrage question getting the trading session's notes on the Tokyo server, say). The rest are mostly first prompts of a session ("向导填完了，启动桥接吧"), which pass on relevance alone. Next: inject only the rounds that really match instead of filling the 1,000 tokens.
+
+**Cost.** The server's gate and recall take 0.2–0.4 s on the real store; reading the session's recent prompts from its transcript takes under 50 ms, even for a 123 MB transcript, whose last megabytes are mostly tool output (the hook widens its read from 2 to 16 MB, and a transcript read only in part never counts as a new session).
+
+## 13. Reproducing
 
 | What | Command | Cost |
 |---|---|---|
